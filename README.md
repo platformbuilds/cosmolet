@@ -28,10 +28,10 @@ Cosmolet is a Kubernetes controller that automatically advertises LoadBalancer s
 
 ```bash
 # Install using kubectl
-kubectl apply -f https://github.com/cosmolet/cosmolet/releases/latest/download/cosmolet.yaml
+kubectl apply -f https://github.com/platformbuilds/cosmolet/releases/latest/download/cosmolet.yaml
 
 # Or using Helm
-helm repo add cosmolet https://cosmolet.github.io/cosmolet
+helm repo add cosmolet https://github.com/platformbuilds/cosmolet.git
 helm install cosmolet cosmolet/cosmolet
 ```
 
@@ -39,7 +39,7 @@ helm install cosmolet cosmolet/cosmolet
 
 ```bash
 # Clone the repository
-git clone https://github.com/cosmolet/cosmolet.git
+git clone https://github.com/platformbuilds/cosmolet.git
 cd cosmolet
 
 # Deploy using kustomize
