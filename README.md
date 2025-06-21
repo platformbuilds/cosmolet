@@ -1,9 +1,5 @@
 # Cosmolet - BareMetal Kubernetes BGP Service Controller
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/cosmolet/cosmolet)](https://goreportcard.com/report/github.com/cosmolet/cosmolet)
-[![License](https://img.shields.io/github/license/cosmolet/cosmolet)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/cosmolet/cosmolet)](https://github.com/cosmolet/cosmolet/releases)
-
 Cosmolet is a production-ready Kubernetes controller that automatically advertises LoadBalancer service IPs via BGP. It runs as a privileged DaemonSet with direct FRR (Free Range Routing) integration to enable bare-metal Kubernetes clusters to announce service IPs to network infrastructure.
 
 ## 🚀 Features
