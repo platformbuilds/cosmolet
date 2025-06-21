@@ -1,0 +1,21 @@
+apiVersion: v2
+name: cosmolet
+description: BareMetal Kubernetes BGP Service Controller
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/cosmolet/cosmolet
+sources:
+  - https://github.com/cosmolet/cosmolet
+maintainers:
+  - name: cosmolet-team
+    email: maintainers@cosmolet.io
+keywords:
+  - bgp
+  - networking
+  - loadbalancer
+  - bare-metal
+  - kubernetes
+annotations:
+  category: Networking
+  licenses: AGPL-3.0

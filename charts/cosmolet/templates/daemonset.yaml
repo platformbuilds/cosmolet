@@ -1,0 +1,163 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cosmolet.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "cosmolet.labels" . | nindent 4 }}
+    component: bgp-controller
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cosmolet.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.daemonSet.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cosmolet.selectorLabels" . | nindent 8 }}
+        component: bgp-controller
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/path: {{ .Values.metrics.path | quote }}
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cosmolet.serviceAccountName" . }}
+      hostNetwork: {{ .Values.daemonSet.hostNetwork }}
+      hostPID: false
+      hostIPC: false
+      dnsPolicy: {{ .Values.daemonSet.dnsPolicy }}
+      priorityClassName: {{ .Values.daemonSet.priorityClassName }}
+      terminationGracePeriodSeconds: {{ .Values.daemonSet.terminationGracePeriodSeconds }}
+      
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: LOG_LEVEL
+          value: {{ .Values.logging.level | quote }}
+        
+        args:
+        - --config=/etc/cosmolet/config.yaml
+        - --metrics-addr=:{{ .Values.metrics.port }}
+        - --health-addr=:8081
+        - --leader-election={{ .Values.controller.leaderElection }}
+        - --log-level=$(LOG_LEVEL)
+        
+        livenessProbe:
+          {{- toYaml .Values.probes.liveness | nindent 10 }}
+        
+        readinessProbe:
+          {{- toYaml .Values.probes.readiness | nindent 10 }}
+        
+        startupProbe:
+          {{- toYaml .Values.probes.startup | nindent 10 }}
+        
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cosmolet
+          readOnly: true
+        - name: frr-run
+          mountPath: /var/run/frr
+        - name: frr-config
+          mountPath: /etc/frr
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: var-tmp
+          mountPath: /var/tmp
+        - name: sys-net
+          mountPath: /sys/class/net
+          readOnly: true
+        
+        ports:
+        - containerPort: {{ .Values.metrics.port }}
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+      
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "cosmolet.fullname" . }}-config
+          defaultMode: 0644
+      - name: frr-run
+        hostPath:
+          path: /var/run/frr
+          type: DirectoryOrCreate
+      - name: frr-config
+        configMap:
+          name: {{ include "cosmolet.fullname" . }}-frr-config
+          defaultMode: 0644
+      - name: tmp
+        emptyDir:
+          sizeLimit: 100Mi
+      - name: var-tmp
+        emptyDir:
+          sizeLimit: 100Mi
+      - name: sys-net
+        hostPath:
+          path: /sys/class/net
+          type: Directory

@@ -1,0 +1,282 @@
+# Default values for cosmolet
+# This is a YAML-formatted file.
+
+# Image configuration
+image:
+  repository: ghcr.io/cosmolet/cosmolet
+  tag: ""  # defaults to chart appVersion
+  pullPolicy: IfNotPresent
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Override name
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace configuration
+namespace:
+  create: true
+  name: network-system
+
+# BGP Configuration
+bgp:
+  # BGP Autonomous System Number
+  asn: 65001
+  # BGP Router ID (auto-detected if empty)
+  routerId: ""
+  # BGP Neighbors (format: "IP:ASN" or just "IP")
+  neighbors:
+    - "10.0.1.1:65000"
+    - "10.0.1.2:65000"
+  # Networks to redistribute
+  networks:
+    - "10.244.0.0/16"
+  # Enable BFD for fast convergence
+  enableBfd: true
+  # VTY password for FRR (optional)
+  vtyPassword: ""
+
+# Service Advertisement Configuration
+serviceAdvertisement:
+  enabled: true
+  defaultAction: "ignore"  # "advertise" or "ignore"
+  rules:
+    - name: "labeled-services"
+      description: "Services explicitly marked for BGP advertisement"
+      action: "advertise"
+      priority: 100
+      serviceSelector:
+        labels:
+          "cosmolet.io/advertise": "true"
+      bgpAttributes:
+        localPreference: 150
+        communities:
+          - "65001:150"
+    
+    - name: "production-loadbalancers"
+      description: "LoadBalancer services in production namespaces"
+      action: "advertise"
+      serviceSelector:
+        types:
+          - "LoadBalancer"
+        namespaces:
+          - "production"
+          - "prod-*"
+      bgpAttributes:
+        localPreference: 200
+        communities:
+          - "65001:100"
+
+# Controller configuration
+controller:
+  # Number of worker goroutines
+  workers: 3
+  # Work queue size
+  queueSize: 100
+  # Resync period for informers
+  resyncPeriod: "30s"
+  # Enable leader election
+  leaderElection: true
+
+# Health check configuration
+health:
+  # Health check interval
+  checkInterval: "30s"
+  # Global health criteria
+  criteria:
+    minReadyEndpoints: 1
+    minReadyPercentage: 75
+    unhealthyGracePeriod: "2m"
+    healthyGracePeriod: "30s"
+
+# Metrics configuration
+metrics:
+  enabled: true
+  port: 8080
+  path: "/metrics"
+
+# Logging configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+
+# Resource configuration
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Security context
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+  allowPrivilegeEscalation: false
+  runAsUser: 0
+  runAsGroup: 92  # frr group
+  readOnlyRootFilesystem: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Pod security context
+podSecurityContext: {}
+
+# Node selection
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations for running on all nodes
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 30
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+    effect: NoExecute
+    tolerationSeconds: 30
+
+# Affinity rules
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+        - key: node-role.kubernetes.io/worker
+          operator: Exists
+
+# DaemonSet configuration
+daemonSet:
+  # Update strategy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+  
+  # Host networking (required for BGP)
+  hostNetwork: true
+  
+  # DNS policy
+  dnsPolicy: ClusterFirstWithHostNet
+  
+  # Priority class
+  priorityClassName: system-node-critical
+  
+  # Termination grace period
+  terminationGracePeriodSeconds: 60
+
+# Probes configuration
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: 8081
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  
+  readiness:
+    httpGet:
+      path: /readyz
+      port: 8081
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  
+  startup:
+    httpGet:
+      path: /readyz
+      port: 8081
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+    successThreshold: 1
+
+# ConfigMap configuration
+configMap:
+  # Create configmap for cosmolet config
+  create: true
+
+# FRR ConfigMap
+frrConfigMap:
+  # Create FRR configuration configmap
+  create: true
+  # FRR daemon configuration
+  daemons: |
+    bgpd=yes
+    zebra=yes
+    bfdd=yes
+    ospfd=no
+    ospf6d=no
+    ripd=no
+    ripngd=no
+    isisd=no
+    pimd=no
+    ldpd=no
+    nhrpd=no
+    eigrpd=no
+    babeld=no
+    sharpd=no
+    pbrd=no
+    fabricd=no
+    vrrpd=no
+  # Base FRR configuration
+  config: |
+    frr version 8.5.1
+    frr defaults datacenter
+    hostname cosmolet-frr
+    log file /var/log/frr/frr.log
+    log timestamp precision 3
+    service integrated-vtysh-config
+    route-map KUBE-SERVICES permit 10
+     set community 65001:1000
+    line vty
+     exec-timeout 0 0
+
+# ServiceMonitor for Prometheus
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
+# Network Policy
+networkPolicy:
+  enabled: false
+
+# RBAC configuration
+rbac:
+  create: true
+  
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Additional labels for all resources
+commonLabels: {}
+
+# Additional annotations for all resources
+commonAnnotations: {}

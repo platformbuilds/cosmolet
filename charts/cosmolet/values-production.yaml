@@ -1,0 +1,32 @@
+# Production values for cosmolet
+bgp:
+  asn: 65001
+  neighbors:
+    - "10.0.1.1:65000"
+    - "10.0.1.2:65000"
+
+serviceAdvertisement:
+  defaultAction: "ignore"
+  rules:
+    - name: "production-lb"
+      action: "advertise"
+      serviceSelector:
+        types: ["LoadBalancer"]
+        namespaces: ["production", "prod-*"]
+      bgpAttributes:
+        localPreference: 200
+        communities: ["65001:100"]
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+metrics:
+  enabled: true
+
+serviceMonitor:
+  enabled: true

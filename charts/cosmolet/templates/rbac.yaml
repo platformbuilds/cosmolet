@@ -1,0 +1,170 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cosmolet.fullname" . }}
+  labels:
+    {{- include "cosmolet.labels" . | nindent 4 }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+rules:
+# Core service and endpoint access
+- apiGroups: [""]
+  resources:
+  - services
+  - services/status
+  - endpoints
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+
+# Node access for BGP peering
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/status
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+  - update
+
+# Pod access for service discovery
+- apiGroups: [""]
+  resources:
+  - pods
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+
+# ConfigMap and Secret access
+- apiGroups: [""]
+  resources:
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
+# Events for troubleshooting
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+
+# Leader election
+- apiGroups: ["coordination.k8s.io"]
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+
+# Network policy access
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cosmolet.fullname" . }}
+  labels:
+    {{- include "cosmolet.labels" . | nindent 4 }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "cosmolet.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "cosmolet.serviceAccountName" . }}
+  namespace: {{ .Values.namespace.name }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cosmolet.fullname" . }}-namespace
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "cosmolet.labels" . | nindent 4 }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+rules:
+# Leader election in the same namespace
+- apiGroups: ["coordination.k8s.io"]
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+
+# ConfigMap management in namespace
+- apiGroups: [""]
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+
+# Events in namespace
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - list
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cosmolet.fullname" . }}-namespace
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "cosmolet.labels" . | nindent 4 }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cosmolet.fullname" . }}-namespace
+subjects:
+- kind: ServiceAccount
+  name: {{ include "cosmolet.serviceAccountName" . }}
+  namespace: {{ .Values.namespace.name }}
+{{- end }}
