@@ -19,9 +19,9 @@ This project adheres to a Code of Conduct. By participating, you are expected to
 
 1. **Fork the repository**
    ```bash
-   git clone https://github.com/cosmolet/cosmolet.git
+   git clone https://github.com/platformbuilds/cosmolet.git
    cd cosmolet
-   git remote add upstream https://github.com/cosmolet/cosmolet.git
+   git remote add upstream https://github.com/platformbuilds/cosmolet.git
    ```
 
 2. **Create a feature branch**
