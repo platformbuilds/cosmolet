@@ -7,6 +7,9 @@ Cosmolet is a Kubernetes controller that automatically advertises LoadBalancer s
 
 ## 🚀 Features
 
+Reference Network Architecture
+![Reference Network Architecture - HLD](./cosmolet.png)
+
 - **Automatic Service Discovery**: Monitors all Kubernetes services across the cluster
 - **BGP Route Advertisement**: Integrates with FRR to advertise ClusterIP and LoadBalancer service IPs
 - **Health-based Routing**: Only advertises routes for healthy services with ready endpoints
