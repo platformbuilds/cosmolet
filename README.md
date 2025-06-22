@@ -140,11 +140,11 @@ go build -gcflags="all=-N -l" -o ./bin/cosmolet-debug ./cmd/cosmolet
 
 ### Build Flags Explanation
 
-`-ldflags='-w -s'`: Remove debug info and symbol table (reduces binary size)
-`-extldflags "-static"`: Create statically linked binary
-`CGO_ENABLED=0`: Disable CGO for pure Go binary
-`-a`: Force rebuilding of packages
-`-installsuffix cgo`: Use different install suffix for CGO
+* `-ldflags='-w -s'`: Remove debug info and symbol table (reduces binary size)
+* `-extldflags "-static"`: Create statically linked binary
+* `CGO_ENABLED=0`: Disable CGO for pure Go binary
+* `-a`: Force rebuilding of packages
+* `-installsuffix cgo`: Use different install suffix for CGO
 
 ### Environment Variables for Build
 ```
