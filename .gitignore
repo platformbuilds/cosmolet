@@ -28,7 +28,8 @@ go.work.sum
 .env
 
 # binaries
-releases/cosmolet-*
+bin/cosmolet-*
+bin/*
 
 # dev testing
 ./v2/*
