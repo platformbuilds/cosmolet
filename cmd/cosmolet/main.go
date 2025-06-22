@@ -26,7 +26,7 @@ var (
 	configPath = flag.String("config", defaultConfigPath, "Path to configuration file")
 	logLevel   = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
 	version    = flag.Bool("version", false, "Print version information")
-	
+
 	// Build information (set via ldflags)
 	Version   = "dev"
 	GitCommit = "unknown"
@@ -94,12 +94,12 @@ func printVersion() {
 
 func startHealthServer(checker *health.Checker) {
 	mux := http.NewServeMux()
-	
+
 	// Health endpoints
 	mux.HandleFunc("/healthz", checker.LivenessHandler)
 	mux.HandleFunc("/readyz", checker.ReadinessHandler)
 	mux.HandleFunc("/version", versionHandler)
-	
+
 	// Metrics endpoint (basic for now)
 	mux.HandleFunc("/metrics", metricsHandler)
 
@@ -124,7 +124,7 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	// Basic metrics endpoint - in a real implementation, 
+	// Basic metrics endpoint - in a real implementation,
 	// you would use Prometheus client library
 	w.Header().Set("Content-Type", "text/plain")
 	fmt.Fprintf(w, "# HELP cosmolet_info Information about cosmolet\n")
@@ -135,10 +135,10 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 func waitForShutdown(cancel context.CancelFunc) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	sig := <-sigChan
 	log.Printf("Received signal: %s", sig)
-	
+
 	// Give some time for graceful shutdown
 	cancel()
 	time.Sleep(5 * time.Second)

@@ -25,593 +25,171 @@ Reference Network Architecture
 - BGP-capable network infrastructure (switches/routers)
 - Cluster admin permissions for installation
 
-# Cosmolet - Go Build Instructions
-
-This guide provides comprehensive instructions for building the Cosmolet BGP Service Controller from source.
-
-## Prerequisites
-
-### Go Installation
-
-**Minimum Required Version:** Go 1.21+
-
-#### Install Go
-
-**Linux/macOS:**
-```bash
-# Download and install Go 1.21
-wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
-
-# Add to PATH (add to ~/.bashrc or ~/.zshrc)
-export PATH=$PATH:/usr/local/go/bin
-export GOPATH=$HOME/go
-export GOBIN=$GOPATH/bin
+# Build & Release Instructuction
+## Clone the repository
 ```
-
-**macOS (using Homebrew):**
-```bash
-brew install go@1.21
-```
-
-**Windows:**
-Download from https://golang.org/dl/ and run the installer.
-
-#### Verify Installation
-```bash
-go version
-# Should output: go version go1.21.x
-```
-
-### Development Tools
-
-```bash
-# Install development tools
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-go install golang.org/x/tools/cmd/goimports@latest
-go install golang.org/x/vuln/cmd/govulncheck@latest
-```
-
-### System Dependencies
-
-**For Local Development:**
-```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y git make curl
-
-# macOS
-brew install git make curl
-
-# For FRR integration (optional for build, required for runtime)
-sudo apt-get install -y frr frr-pythontools  # Ubuntu/Debian
-```
-
-## Project Setup
-
-### 1. Clone Repository
-
-```bash
-git clone https://github.com/your-org/cosmolet.git
+git clone https://github.com/platformbuilds/cosmolet.git
 cd cosmolet
 ```
 
-### 2. Verify Go Module
-
-```bash
-# Check go.mod exists and is valid
-cat go.mod
-
-# Download dependencies
+## Download dependencies
+```
 go mod download
-go mod tidy
 ```
 
-### 3. Verify Project Structure
+## Build the binary
 
-```bash
-tree -L 3
-# Should show:
-# ├── cmd/cosmolet/
-# ├── pkg/
-# │   ├── config/
-# │   ├── controller/
-# │   └── health/
-# ├── go.mod
-# └── go.sum
+### Simple build (dev only)
+```
+go build -o ./bin/cosmolet ./cmd/cosmolet
 ```
 
-## Building the Application
-
-### 1. Basic Build
-
-```bash
-# Simple build (development)
-go build ./cmd/cosmolet
-
-# Or use Make (recommended)
-make build
+### Production Build (Optimized)
 ```
-
-### 2. Build with Version Information
-
-```bash
-# Set version variables
-export VERSION="v1.0.0"
-export GIT_COMMIT=$(git rev-parse HEAD)
-export BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-
-# Build with ldflags
-go build \
-  -ldflags="-w -s -X main.Version=${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-  -o bin/cosmolet \
-  ./cmd/cosmolet
-```
-
-### 3. Optimized Production Build
-
-```bash
-# Production build with optimizations
+#Build with optimizations (same as used in Dockerfile)
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-  -ldflags="-w -s -X main.Version=${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-  -trimpath \
-  -o bin/cosmolet-linux-amd64 \
-  ./cmd/cosmolet
+    -ldflags='-w -s -extldflags "-static"' \
+    -a -installsuffix cgo \
+    -o ./bin/cosmolet \
+    ./cmd/cosmolet
 ```
 
-### 4. Cross-Platform Builds
+### Cross-Platform Compilation
 
-```bash
-# Build for multiple platforms
-make build-all
+```
+# Linux (default)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -ldflags='-w -s -extldflags "-static"' \
+  -a -installsuffix cgo \
+  -o ./bin/cosmolet-linux-amd64 \
+  ./cmd/cosmolet
 
-# Or manually:
-# Linux AMD64
-GOOS=linux GOARCH=amd64 go build -o bin/cosmolet-linux-amd64 ./cmd/cosmolet
-
-# Linux ARM64
-GOOS=linux GOARCH=arm64 go build -o bin/cosmolet-linux-arm64 ./cmd/cosmolet
-
-# macOS AMD64
-GOOS=darwin GOARCH=amd64 go build -o bin/cosmolet-darwin-amd64 ./cmd/cosmolet
-
-# macOS ARM64 (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -o bin/cosmolet-darwin-arm64 ./cmd/cosmolet
+# macOS
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+  -ldflags='-w -s -extldflags "-static"' \
+  -a -installsuffix cgo \
+  -o ./bin/cosmolet-linux-darwin-amd64 \
+  ./cmd/cosmolet
 
 # Windows
-GOOS=windows GOARCH=amd64 go build -o bin/cosmolet-windows-amd64.exe ./cmd/cosmolet
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+  -ldflags='-w -s -extldflags "-static"' \
+  -a -installsuffix cgo \
+  -o ./bin/cosmolet-windows-amd64 \
+  ./cmd/cosmolet
+
+# ARM64 (for ARM-based systems)
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+  -ldflags='-w -s -extldflags "-static"' \
+  -a -installsuffix cgo \
+  -o ./bin/cosmolet-linux-arm64 \
+  ./cmd/cosmolet
 ```
 
-### 5. Using Makefile
+### Using the Makefile
+The project includes a comprehensive Makefile with various build targets:
+```
+# Download dependencies
+make deps
 
-The provided Makefile includes several build targets:
-
-```bash
-# Show all available targets
-make help
-
-# Basic build
+# Build binary
 make build
 
-# Build for all platforms
-make build-all
-
-# Clean build artifacts
-make clean
-
-# Build and run tests
-make test
-
-# Run linter
-make lint
-
-# Development build and run
-make dev
-```
-
-## Docker Builds
-
-### 1. Basic Docker Build
-
-```bash
-# Build Docker image
-docker build -t cosmolet:latest .
-
-# Or use Make
-make docker-build
-```
-
-### 2. Multi-Platform Docker Build
-
-```bash
-# Set up buildx (if not already done)
-docker buildx create --name cosmolet-builder --use
-
-# Build for multiple platforms
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=${VERSION} \
-  --build-arg GIT_COMMIT=${GIT_COMMIT} \
-  --build-arg BUILD_DATE=${BUILD_DATE} \
-  -t cosmolet/cosmolet:${VERSION} \
-  -t cosmolet/cosmolet:latest \
-  --push .
-```
-
-### 3. Debug Docker Build
-
-```bash
-# Build debug version with additional tools
-docker build -f Dockerfile.debug -t cosmolet:debug .
-```
-
-## Testing
-
-### 1. Run Unit Tests
-
-```bash
-# Basic test run
-go test ./...
-
-# With verbose output
-go test -v ./...
-
-# With coverage
-go test -v -race -coverprofile=coverage.out ./...
-
-# Generate coverage report
-go tool cover -html=coverage.out -o coverage.html
-```
-
-### 2. Using Make for Testing
-
-```bash
-# Run tests with coverage
-make test
-
-# Run tests with coverage report
-make test-coverage
-
-# Run benchmarks
-RUN_BENCHMARKS=true make test
-
-# Run integration tests (if available)
-RUN_INTEGRATION=true make test
-```
-
-### 3. Linting and Code Quality
-
-```bash
-# Run golangci-lint
-golangci-lint run
-
-# Or use Make
-make lint
-
-# Format code
-go fmt ./...
-goimports -w .
-
-# Or use Make
-make fmt
-
-# Run vulnerability check
-govulncheck ./...
-```
-
-## Development Workflow
-
-### 1. Development Setup
-
-```bash
-# Set up development environment
-./scripts/dev-setup.sh
-
-# Or manually:
-go mod download
-go mod tidy
-make build
-```
-
-### 2. Local Development
-
-```bash
-# Run with development config
-go run ./cmd/cosmolet --config examples/dev-config.yaml --log-level debug
-
-# Or use Make
-make dev
-```
-
-### 3. Pre-commit Checks
-
-```bash
-# Run all checks before committing
+# Build with all checks (fmt, vet, test)
 make check
 
-# This runs:
-# - go fmt
-# - go vet  
-# - golangci-lint
-# - tests
+# Clean build
+make clean && make build
 ```
 
-## IDE Configuration
 
-### Visual Studio Code
+### Multi-Architecture Build Script
+```
+#!/bin/bash
+# build-all.sh
 
-Create `.vscode/settings.json`:
+platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "windows/amd64")
 
-```json
-{
-    "go.toolsManagement.checkForUpdates": "local",
-    "go.useLanguageServer": true,
-    "go.lintOnSave": "package",
-    "go.formatTool": "goimports",
-    "go.testFlags": ["-v", "-race"],
-    "go.buildFlags": ["-v"],
-    "go.vetOnSave": "package"
-}
+for platform in "${platforms[@]}"
+do
+    platform_split=(${platform//\// })
+    GOOS=${platform_split[0]}
+    GOARCH=${platform_split[1]}
+    output_name='./bin/cosmolet-'$GOOS'-'$GOARCH
+    if [ $GOOS = "windows" ]; then
+        output_name+='.exe'
+    fi
+
+    env GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build \
+        -ldflags='-w -s' \
+        -o bin/$output_name ./cmd/cosmolet
+        
+    if [ $? -ne 0 ]; then
+        echo 'An error has occurred! Aborting the script execution...'
+        exit 1
+    fi
+done
 ```
 
-Create `.vscode/launch.json` for debugging:
-
-```json
-{
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Launch Cosmolet",
-            "type": "go",
-            "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/cmd/cosmolet",
-            "args": [
-                "--config",
-                "${workspaceFolder}/examples/dev-config.yaml",
-                "--log-level",
-                "debug"
-            ],
-            "env": {}
-        }
-    ]
-}
+### Development Build
+```
+# Build with debug info
+go build -gcflags="all=-N -l" -o ./bin/cosmolet-debug ./cmd/cosmolet
 ```
 
-### GoLand/IntelliJ
 
-1. Open the project directory
-2. Go to **File → Settings → Go → Build Tags & Vendoring**
-3. Set **Build tags**: `integration` (for integration tests)
-4. Set **Environment**: `CGO_ENABLED=0` (for static builds)
+### Build Flags Explanation
 
-## Build Optimization
+`-ldflags='-w -s'`: Remove debug info and symbol table (reduces binary size)
+`-extldflags "-static"`: Create statically linked binary
+`CGO_ENABLED=0`: Disable CGO for pure Go binary
+`-a`: Force rebuilding of packages
+`-installsuffix cgo`: Use different install suffix for CGO
 
-### 1. Reduce Binary Size
+### Environment Variables for Build
+```
+# Set common build environment
+export CGO_ENABLED=0
+export GOOS=linux
+export GOARCH=amd64
 
-```bash
-# Use build flags to reduce size
-go build \
-  -ldflags="-w -s" \    # Remove debug info and symbol table
-  -trimpath \           # Remove file system paths
-  ./cmd/cosmolet
-
-# Use UPX compression (optional)
-upx --best bin/cosmolet
+# Build with environment
+go build -ldflags='-w -s' -o cosmolet ./cmd/main.go
 ```
 
-### 2. Enable Compiler Optimizations
+## Verification
+After building, verify the binary:
+```
+# Check binary info
+file cosmolet
+ldd cosmolet  # Should show "not a dynamic executable" for static build
 
-```bash
-# Build with optimizations
-go build \
-  -ldflags="-w -s" \
-  -gcflags="-l=4" \     # Aggressive inlining
-  -asmflags="-trimpath=$(PWD)" \
-  ./cmd/cosmolet
+# Test binary
+./cosmolet --help
+./cosmolet --version
 ```
 
-### 3. Static Binary Build
-
-```bash
-# Build completely static binary
-CGO_ENABLED=0 \
-GOOS=linux \
-GOARCH=amd64 \
-go build \
-  -a \
-  -installsuffix cgo \
-  -ldflags="-w -s -extldflags '-static'" \
-  -o bin/cosmolet-static \
-  ./cmd/cosmolet
+## Common Build Issues
+* Dependency Issues:
 ```
-
-## Troubleshooting
-
-### Common Build Issues
-
-#### 1. Module Download Issues
-
-```bash
-# Problem: "go: module ... not found"
-# Solution: Check proxy settings
-go env GOPROXY
-go env GOPRIVATE
-
-# Or disable proxy for private repos
-export GOPRIVATE=github.com/your-org/*
-```
-
-#### 2. Version Conflicts
-
-```bash
-# Problem: "version X is not available"
-# Solution: Update go.mod
-go get -u ./...
 go mod tidy
-```
-
-#### 3. Missing Dependencies
-
-```bash
-# Problem: "package ... not found"
-# Solution: Download missing dependencies
-go mod download
 go mod verify
 ```
 
-#### 4. Build Cache Issues
-
-```bash
-# Clear build cache
-go clean -cache -modcache -i -r
-
-# Rebuild everything
-go build -a ./cmd/cosmolet
+* CGO Dependencies:
+```
+# If you encounter CGO issues, try:
+CGO_ENABLED=0 go build ./cmd/main.go
 ```
 
-### Platform-Specific Issues
-
-#### Linux
-
-```bash
-# If missing gcc for CGO (shouldn't be needed for this project)
-sudo apt-get install build-essential
-
-# If missing git
-sudo apt-get install git
+* Module Path Issues:
+```
+# Ensure you're in the correct directory
+go mod init github.com/platformcosmo/cosmolet  # if starting fresh
 ```
 
-#### macOS
+The resulting binary will be statically linked and suitable for deployment in containers or bare-metal systems without external dependencies.
 
-```bash
-# If Xcode command line tools missing
-xcode-select --install
-
-# If using older macOS with Go modules issues
-export GO111MODULE=on
-```
-
-#### Windows
-
-```bash
-# If using Git Bash, set proper line endings
-git config --global core.autocrlf false
-
-# If path issues
-go env GOPATH
-go env GOROOT
-```
-
-## Performance Considerations
-
-### 1. Build Performance
-
-```bash
-# Use build cache
-export GOCACHE=/tmp/go-build-cache
-
-# Parallel builds
-export GOMAXPROCS=4
-
-# Use vendor directory for faster builds
-go mod vendor
-go build -mod=vendor ./cmd/cosmolet
-```
-
-### 2. Runtime Performance
-
-```bash
-# Build with race detector for testing
-go build -race ./cmd/cosmolet
-
-# Profile builds
-go build -cpuprofile=cpu.prof ./cmd/cosmolet
-```
-
-## CI/CD Integration
-
-### GitHub Actions
-
-The project includes `.github/workflows/ci.yaml`:
-
-```yaml
-name: CI
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-    - name: Build
-      run: make build
-    - name: Test
-      run: make test
-```
-
-### GitLab CI
-
-Example `.gitlab-ci.yml`:
-
-```yaml
-image: golang:1.21
-
-stages:
-  - build
-  - test
-
-build:
-  stage: build
-  script:
-    - make build
-  artifacts:
-    paths:
-      - bin/
-
-test:
-  stage: test
-  script:
-    - make test
-  coverage: '/coverage: \d+\.\d+% of statements/'
-```
-
-## Summary
-
-**Quick Start Commands:**
-
-```bash
-# 1. Setup
-git clone <repo-url>
-cd cosmolet
-go mod download
-
-# 2. Build
-make build
-
-# 3. Test
-make test
-
-# 4. Run locally
-make dev
-
-# 5. Build Docker image
-make docker-build
-
-# 6. Deploy
-helm install cosmolet charts/cosmolet
-```
-
-For any build issues, check:
-1. Go version (must be 1.21+)
-2. Module dependencies (`go mod tidy`)
-3. Environment variables (`go env`)
-4. Build cache (`go clean -cache`)
-
-The build process follows standard Go conventions and should work across all supported platforms.
 
 ## 🤝 Contributing
 
