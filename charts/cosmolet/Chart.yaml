@@ -1,21 +1,22 @@
 apiVersion: v2
 name: cosmolet
-description: BareMetal Kubernetes BGP Service Controller
+description: A Kubernetes BGP Service Controller for automatic ClusterIP advertisement via FRR
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
-home: https://github.com/cosmolet/cosmolet
-sources:
-  - https://github.com/cosmolet/cosmolet
-maintainers:
-  - name: cosmolet-team
-    email: maintainers@cosmolet.io
+version: 0.1.0
+appVersion: "v0.1.0"
 keywords:
-  - bgp
   - networking
-  - loadbalancer
-  - bare-metal
-  - kubernetes
+  - bgp
+  - frr
+  - service-mesh
+  - load-balancing
+home: https://github.com/your-org/cosmolet
+sources:
+  - https://github.com/your-org/cosmolet
+maintainers:
+  - name: Your Name
+    email: your-email@example.com
+    url: https://github.com/your-username
 annotations:
   category: Networking
-  licenses: AGPL-3.0
+  licenses: Apache-2.0

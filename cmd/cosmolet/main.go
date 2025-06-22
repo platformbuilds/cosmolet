@@ -1,77 +1,145 @@
+// cmd/cosmolet/main.go
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
+	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"cosmolet/pkg/config"
+	"cosmolet/pkg/controller"
+	"cosmolet/pkg/health"
+)
+
+const (
+	defaultConfigPath = "/etc/cosmolet/config.yaml"
+	defaultLogLevel   = "info"
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	configPath = flag.String("config", defaultConfigPath, "Path to configuration file")
+	logLevel   = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
+	version    = flag.Bool("version", false, "Print version information")
+	
+	// Build information (set via ldflags)
+	Version   = "dev"
+	GitCommit = "unknown"
+	BuildDate = "unknown"
 )
 
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-}
-
 func main() {
-	var metricsAddr string
-	var enableLeaderElection bool
-	var probeAddr string
-	var configFile string
-	
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
-	flag.StringVar(&configFile, "config", "", "The controller will load its initial configuration from this file.")
-	
-	opts := zap.Options{
-		Development: true,
-	}
-	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if *version {
+		printVersion()
+		return
+	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Metrics: server.Options{
-			BindAddress: metricsAddr,
-		},
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Port: 9443,
-		}),
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "cosmolet-controller",
-	})
+	log.Printf("Starting Cosmolet BGP Service Controller")
+	log.Printf("Version: %s, Commit: %s, Build Date: %s", Version, GitCommit, BuildDate)
+
+	// Load configuration
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Add health checks
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
+	log.Printf("Configuration loaded from: %s", *configPath)
+	log.Printf("Monitoring namespaces: %v", cfg.Services.Namespaces)
+	log.Printf("Loop interval: %d seconds", cfg.LoopIntervalSeconds)
+
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start health check server
+	healthChecker := health.NewChecker()
+	go startHealthServer(healthChecker)
+
+	// Create and start BGP controller
+	bgpController, err := controller.NewBGPServiceController(cfg, ctx)
+	if err != nil {
+		log.Fatalf("Failed to create BGP service controller: %v", err)
 	}
 
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
+	// Start controller in goroutine
+	go func() {
+		if err := bgpController.Start(); err != nil {
+			log.Printf("BGP controller error: %v", err)
+			cancel()
+		}
+	}()
+
+	// Mark as ready
+	healthChecker.SetReady(true)
+
+	// Wait for shutdown signal
+	waitForShutdown(cancel)
+
+	log.Println("Shutting down Cosmolet BGP Service Controller")
+}
+
+func printVersion() {
+	fmt.Printf("Cosmolet BGP Service Controller\n")
+	fmt.Printf("Version: %s\n", Version)
+	fmt.Printf("Git Commit: %s\n", GitCommit)
+	fmt.Printf("Build Date: %s\n", BuildDate)
+}
+
+func startHealthServer(checker *health.Checker) {
+	mux := http.NewServeMux()
+	
+	// Health endpoints
+	mux.HandleFunc("/healthz", checker.LivenessHandler)
+	mux.HandleFunc("/readyz", checker.ReadinessHandler)
+	mux.HandleFunc("/version", versionHandler)
+	
+	// Metrics endpoint (basic for now)
+	mux.HandleFunc("/metrics", metricsHandler)
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
+
+	log.Println("Starting health check server on :8080")
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Health server error: %v", err)
+	}
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{
+		"version": "%s",
+		"gitCommit": "%s",
+		"buildDate": "%s"
+	}`, Version, GitCommit, BuildDate)
+}
+
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	// Basic metrics endpoint - in a real implementation, 
+	// you would use Prometheus client library
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprintf(w, "# HELP cosmolet_info Information about cosmolet\n")
+	fmt.Fprintf(w, "# TYPE cosmolet_info gauge\n")
+	fmt.Fprintf(w, "cosmolet_info{version=\"%s\",commit=\"%s\"} 1\n", Version, GitCommit)
+}
+
+func waitForShutdown(cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	sig := <-sigChan
+	log.Printf("Received signal: %s", sig)
+	
+	// Give some time for graceful shutdown
+	cancel()
+	time.Sleep(5 * time.Second)
 }

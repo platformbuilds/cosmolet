@@ -1,0 +1,17 @@
+# Basic configuration for Cosmolet BGP Service Controller
+services:
+  namespaces:
+    - "default"
+    - "kube-system"
+
+loop_interval_seconds: 30
+
+bgp:
+  enabled: true
+
+logging:
+  level: "info"
+  format: "text"
+
+frr:
+  socket_path: "/var/run/frr"

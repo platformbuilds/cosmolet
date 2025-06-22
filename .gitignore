@@ -30,6 +30,9 @@ go.work.sum
 # binaries
 releases/cosmolet-*
 
+# dev testing
+./v2/*
+
 # Editor/IDE
 # .idea/
 # .vscode/
