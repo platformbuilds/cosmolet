@@ -25,6 +25,9 @@ Reference Network Architecture
 - BGP-capable network infrastructure (switches/routers)
 - Cluster admin permissions for installation
 
+## Code Flowchart
+![High Level Algorithm/Flowchart](./flowchart/flowchart-1.png)
+
 # Build & Release Instructuction
 ## Clone the repository
 ```
