@@ -79,6 +79,7 @@ func (c *BGPServiceController) runControlLoop() {
 
 	c.healthChecker.UpdateLastLoop()
 
+	// Step 1: Fetch all running services in configured namespaces
 	services, err := c.fetchServicesFromNamespaces()
 	if err != nil {
 		log.Printf("Error fetching services: %v", err)
@@ -90,6 +91,7 @@ func (c *BGPServiceController) runControlLoop() {
 	log.Printf("Found %d services to process", len(services))
 	c.healthChecker.CheckServiceDiscovery(len(services), time.Since(start))
 
+	// Step 2: Process each service
 	for _, service := range services {
 		select {
 		case <-c.ctx.Done():
@@ -138,6 +140,7 @@ func (c *BGPServiceController) processService(service v1.Service) {
 		log.Printf("Error performing health check for service %s: %v", serviceKey, err)
 		return
 	}
+	// Step 3: Decision - Service ClusterIP is healthy?
 	if !isHealthy {
 		log.Printf("Service %s marked unhealthy — skipping", serviceKey)
 		return
@@ -145,16 +148,19 @@ func (c *BGPServiceController) processService(service v1.Service) {
 
 	log.Printf("Service %s is healthy", serviceKey)
 
+	// Step 4: Check if service ClusterIP is already advertised by FRR via BGP
 	isAdvertised, err := c.isServiceAdvertisedByFRR(clusterIP)
 	if err != nil {
 		log.Printf("Error checking BGP advertisement status for service %s: %v", serviceKey, err)
 		return
 	}
+	// Step 5: Decision - Service ClusterIP is already advertised?
 	if isAdvertised {
 		log.Printf("Service %s already advertised — nothing to do", serviceKey)
 		return
 	}
 
+	// Step 6: Advertise the Service ClusterIP using FRR
 	log.Printf("Advertising service %s (ClusterIP: %s) via BGP", serviceKey, clusterIP)
 	if err := c.advertiseServiceViaBGP(clusterIP); err != nil {
 		log.Printf("Error advertising service %s via BGP: %v", serviceKey, err)
@@ -185,7 +191,7 @@ func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, err
 
 // isServiceAdvertisedByFRR checks if the ClusterIP is locally assigned and advertised via BGP
 func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool, error) {
-	// Step 1: Check if IP exists on loopback interface
+
 	iface, err := net.InterfaceByName("lo")
 	if err != nil {
 		return false, fmt.Errorf("failed to get loopback interface: %v", err)
