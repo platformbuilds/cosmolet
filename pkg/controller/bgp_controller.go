@@ -37,9 +37,15 @@ type ServiceInfo struct {
 // NewBGPServiceController creates a new BGP service controller
 func NewBGPServiceController(cfg *config.Config, ctx context.Context) (*BGPServiceController, error) {
 	// Create in-cluster config (since we're running as a DaemonSet)
-	kubeConfig, err := rest.InClusterConfig()
+	// kubeConfig, err := rest.InClusterConfig()
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to create in-cluster config: %v", err)
+	// }
+	
+	// Get Kubernetes config (in-cluster or local)
+	kubeConfig, err := GetKubeConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create in-cluster config: %v", err)
+		return nil, fmt.Errorf("failed to get Kubernetes config: %w", err)
 	}
 
 	// Create Kubernetes client
