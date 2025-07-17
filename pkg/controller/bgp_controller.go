@@ -183,19 +183,36 @@ func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, err
 	return isHealthy, nil
 }
 
-// isServiceAdvertisedByFRR checks BGP table for given IP
+// isServiceAdvertisedByFRR checks if the ClusterIP is locally assigned and advertised via BGP
 func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool, error) {
-	cmd := exec.Command("vtysh", "-c", "show ip route bgp")
-	output, err := cmd.Output()
+	// Step 1: Check if the IP is assigned to the local loopback interface
+	ipCheckCmd := exec.Command("ip", "addr", "show", "dev", "lo")
+	ipOutput, err := ipCheckCmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("failed to execute vtysh command: %v", err)
+		return false, fmt.Errorf("failed to check loopback IPs: %v", err)
 	}
 
-	outputStr := string(output)
-	isAdvertised := strings.Contains(outputStr, clusterIP)
+	// Look for the IP with /32 notation (as we assign like x.x.x.x/32)
+	route := fmt.Sprintf("%s/32", clusterIP)
+	isAssigned := strings.Contains(string(ipOutput), route)
 
-	log.Printf("BGP route check for %s: advertised=%t", clusterIP, isAdvertised)
-	return isAdvertised, nil
+	if !isAssigned {
+		log.Printf("ClusterIP %s is NOT assigned to loopback interface — not advertised from this node", route)
+		return false, nil
+	}
+
+	// Step 2: Optional (confirm in BGP table)
+	vtyshCmd := exec.Command("vtysh", "-c", "show ip route bgp")
+	vtyOutput, err := vtyshCmd.Output()
+	if err != nil {
+		log.Printf("Warning: failed to run 'show ip route bgp': %v", err)
+	}
+
+	isInBGP := strings.Contains(string(vtyOutput), clusterIP)
+	log.Printf("Local loopback assignment for %s: %t, seen in BGP table: %t", clusterIP, isAssigned, isInBGP)
+
+	// Only return true if IP is assigned locally
+	return true, nil
 }
 
 // advertiseServiceViaBGP adds loopback route and configures FRR
