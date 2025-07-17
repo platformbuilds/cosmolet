@@ -245,11 +245,18 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	asn := c.config.GetBGPASN()
 	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
-	// Compose the full vtysh command with all config steps
+	// Assign IP to loopback (ensure it's there for FRR to redistribute)
+	assignCmd := exec.Command("ip", "addr", "add", route, "dev", "lo")
+	if output, err := assignCmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: failed to assign IP to loopback: %v\nOutput: %s", err, output)
+		// You might want to continue anyway if the IP already exists
+	}
+
+	// Apply BGP network advertisement
 	cmd := exec.Command(
 		"vtysh",
 		"-c", "configure terminal",
-		"-c", "router bgp "+fmt.Sprint(asn),
+		"-c", fmt.Sprintf("router bgp %d", asn),
 		"-c", "address-family ipv4 unicast",
 		"-c", fmt.Sprintf("network %s", route),
 		"-c", "exit-address-family",
@@ -260,8 +267,15 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	if err != nil {
 		return fmt.Errorf("failed to advertise route via BGP: %v\nOutput: %s", err, output)
 	}
+	log.Printf("vtysh route advertisement successful: %s", output)
 
-	log.Printf("Successfully advertised %s via BGP ASN %d", route, asn)
+	// Write the updated config to disk
+	writeCmd := exec.Command("vtysh", "-c", "write memory")
+	if output, err := writeCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to persist config to /etc/frr/frr.conf: %v\nOutput: %s", err, output)
+	}
+
+	log.Printf("Successfully advertised %s via BGP and saved config to /etc/frr/frr.conf", route)
 	return nil
 }
 
