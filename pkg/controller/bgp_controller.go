@@ -242,30 +242,26 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	}
 
 	route := fmt.Sprintf("%s/32", clusterIP)
-	asn := c.config.GetBGPASN() // <- Make sure this returns 65396 from config
+	asn := c.config.GetBGPASN()
+	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
-	commands := []string{
-		"configure terminal",
-		"interface lo",
-		fmt.Sprintf("ip address %s", route),
-		"exit",
-		fmt.Sprintf("router bgp %d", asn),
-		"address-family ipv4 unicast",
-		fmt.Sprintf("network %s", route),
-		"exit",
-		"exit",
+	// Compose the full vtysh command with all config steps
+	cmd := exec.Command(
+		"vtysh",
+		"-c", "configure terminal",
+		"-c", "router bgp "+fmt.Sprint(asn),
+		"-c", "address-family ipv4 unicast",
+		"-c", fmt.Sprintf("network %s", route),
+		"-c", "exit-address-family",
+		"-c", "exit",
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to advertise route via BGP: %v\nOutput: %s", err, output)
 	}
 
-	for _, cmd := range commands {
-		vtyshCmd := exec.Command("vtysh", "-c", cmd)
-		output, err := vtyshCmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("error executing vtysh command [%s]: %v\nOutput: %s", cmd, err, string(output))
-		}
-		log.Printf("vtysh executed: %s", cmd)
-	}
-
-	log.Printf("Dynamically advertised %s via interface lo and BGP ASN %d", route, asn)
+	log.Printf("Successfully advertised %s via BGP ASN %d", route, asn)
 	return nil
 }
 
