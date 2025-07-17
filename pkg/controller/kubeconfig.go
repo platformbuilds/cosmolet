@@ -10,15 +10,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// GetKubeConfig attempts in-cluster config first, falls back to local config
+// GetKubeConfig returns a Kubernetes config usable both in and out of cluster
 func GetKubeConfig() (*rest.Config, error) {
-	log.Println("Trying in-cluster Kubernetes config...")
+	// Try in-cluster config first
 	config, err := rest.InClusterConfig()
 	if err == nil {
-		log.Println("Using in-cluster config")
+		log.Println("Using in-cluster Kubernetes config")
 		return config, nil
 	}
 
+	// Fall back to KUBECONFIG or ~/.kube/config
 	log.Println("Falling back to local kubeconfig")
 
 	kubeconfig := os.Getenv("KUBECONFIG")
@@ -32,9 +33,9 @@ func GetKubeConfig() (*rest.Config, error) {
 
 	config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+		return nil, fmt.Errorf("failed to load kubeconfig from %s: %w", kubeconfig, err)
 	}
 
-	log.Println("Using kubeconfig from:", kubeconfig)
+	log.Printf("Using kubeconfig from %s", kubeconfig)
 	return config, nil
 }
