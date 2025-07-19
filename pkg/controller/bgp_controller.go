@@ -1,4 +1,3 @@
-// pkg/controller/bgp_controller.go
 package controller
 
 import (
@@ -8,14 +7,13 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-
+	"net"
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/health"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
 // BGPServiceController manages BGP advertisements for Kubernetes services
@@ -26,23 +24,13 @@ type BGPServiceController struct {
 	healthChecker *health.Checker
 }
 
-// ServiceInfo contains information about a discovered service
-type ServiceInfo struct {
-	Name      string
-	Namespace string
-	ClusterIP string
-	Healthy   bool
-}
-
 // NewBGPServiceController creates a new BGP service controller
 func NewBGPServiceController(cfg *config.Config, ctx context.Context) (*BGPServiceController, error) {
-	// Create in-cluster config (since we're running as a DaemonSet)
-	kubeConfig, err := rest.InClusterConfig()
+	kubeConfig, err := GetKubeConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create in-cluster config: %v", err)
+		return nil, fmt.Errorf("failed to get Kubernetes config: %w", err)
 	}
 
-	// Create Kubernetes client
 	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kubernetes client: %v", err)
@@ -60,14 +48,12 @@ func NewBGPServiceController(cfg *config.Config, ctx context.Context) (*BGPServi
 func (c *BGPServiceController) Start() error {
 	log.Println("Starting BGP Service Controller...")
 
-	// Test Kubernetes API connectivity
 	if err := c.testKubernetesAPI(); err != nil {
 		c.healthChecker.CheckKubernetesAPI(false, err.Error())
 		return fmt.Errorf("kubernetes API connectivity test failed: %v", err)
 	}
 	c.healthChecker.CheckKubernetesAPI(true, "Connected")
 
-	// Test FRR connectivity
 	if err := c.testFRRConnectivity(); err != nil {
 		c.healthChecker.CheckFRRStatus(false, err.Error())
 		log.Printf("Warning: FRR connectivity test failed: %v", err)
@@ -91,7 +77,6 @@ func (c *BGPServiceController) runControlLoop() {
 	start := time.Now()
 	log.Println("=== Starting new loop iteration ===")
 
-	// Update health checker
 	c.healthChecker.UpdateLastLoop()
 
 	// Step 1: Fetch all running services in configured namespaces
@@ -116,7 +101,6 @@ func (c *BGPServiceController) runControlLoop() {
 		}
 	}
 
-	// Step 4: Sleep and restart loop
 	duration := time.Since(start)
 	log.Printf("Loop finished in %v. Sleeping for %d seconds...", duration, c.config.GetLoopInterval())
 	c.sleep()
@@ -134,7 +118,6 @@ func (c *BGPServiceController) fetchServicesFromNamespaces() ([]v1.Service, erro
 			return nil, fmt.Errorf("failed to list services in namespace %s: %v", namespace, err)
 		}
 
-		// Filter for services with ClusterIP
 		for _, service := range services.Items {
 			if service.Spec.ClusterIP != "" && service.Spec.ClusterIP != "None" {
 				allServices = append(allServices, service)
@@ -145,61 +128,56 @@ func (c *BGPServiceController) fetchServicesFromNamespaces() ([]v1.Service, erro
 	return allServices, nil
 }
 
-// processService processes a single service through the health check and BGP advertisement flow
+// processService handles health and BGP advertisement for one service
 func (c *BGPServiceController) processService(service v1.Service) {
 	serviceKey := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
-	log.Printf("Processing service: %s (ClusterIP: %s)", serviceKey, service.Spec.ClusterIP)
+	clusterIP := service.Spec.ClusterIP
 
-	// Step 2: Perform health check
+	log.Printf("Processing service: %s (ClusterIP: %s)", serviceKey, clusterIP)
+
 	isHealthy, err := c.performHealthCheck(service)
 	if err != nil {
 		log.Printf("Error performing health check for service %s: %v", serviceKey, err)
 		return
 	}
-
 	// Step 3: Decision - Service ClusterIP is healthy?
 	if !isHealthy {
-		log.Printf("LOG and Stop: Service %s ClusterIP is unhealthy", serviceKey)
+		log.Printf("Service %s marked unhealthy — skipping", serviceKey)
 		return
 	}
 
 	log.Printf("Service %s is healthy", serviceKey)
 
 	// Step 4: Check if service ClusterIP is already advertised by FRR via BGP
-	isAdvertised, err := c.isServiceAdvertisedByFRR(service.Spec.ClusterIP)
+	isAdvertised, err := c.isServiceAdvertisedByFRR(clusterIP)
 	if err != nil {
 		log.Printf("Error checking BGP advertisement status for service %s: %v", serviceKey, err)
 		return
 	}
-
 	// Step 5: Decision - Service ClusterIP is already advertised?
 	if isAdvertised {
-		log.Printf("LOG and Stop: Service %s ClusterIP is healthy and already advertised", serviceKey)
+		log.Printf("Service %s already advertised — nothing to do", serviceKey)
 		return
 	}
 
 	// Step 6: Advertise the Service ClusterIP using FRR
-	log.Printf("Service %s ClusterIP is not advertised. Advertising via FRR...", serviceKey)
-	err = c.advertiseServiceViaBGP(service.Spec.ClusterIP)
-	if err != nil {
+	log.Printf("Advertising service %s (ClusterIP: %s) via BGP", serviceKey, clusterIP)
+	if err := c.advertiseServiceViaBGP(clusterIP); err != nil {
 		log.Printf("Error advertising service %s via BGP: %v", serviceKey, err)
 		return
 	}
-
-	log.Printf("Successfully advertised service %s ClusterIP via BGP", serviceKey)
+	log.Printf("Successfully advertised service %s", serviceKey)
 }
 
-// performHealthCheck checks the health of a service by examining its endpoints
+// performHealthCheck checks if service has at least one ready endpoint
 func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, error) {
 	serviceKey := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 
-	// Get endpoints for the service
 	endpoints, err := c.client.CoreV1().Endpoints(service.Namespace).Get(c.ctx, service.Name, metav1.GetOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to get endpoints for service %s: %v", serviceKey, err)
 	}
 
-	// Check if there are any ready endpoints
 	readyEndpoints := 0
 	for _, subset := range endpoints.Subsets {
 		readyEndpoints += len(subset.Addresses)
@@ -211,71 +189,107 @@ func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, err
 	return isHealthy, nil
 }
 
-// isServiceAdvertisedByFRR checks if a ClusterIP is already advertised by FRR via BGP
+// isServiceAdvertisedByFRR checks if the ClusterIP is locally assigned and advertised via BGP
 func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool, error) {
-	// Use vtysh to check if the route is already advertised
-	cmd := exec.Command("vtysh", "-c", "show ip route bgp")
-	output, err := cmd.Output()
+
+	iface, err := net.InterfaceByName("lo")
 	if err != nil {
-		return false, fmt.Errorf("failed to execute vtysh command: %v", err)
+		return false, fmt.Errorf("failed to get loopback interface: %v", err)
 	}
 
-	// Check if the ClusterIP appears in BGP routes
-	outputStr := string(output)
-	isAdvertised := strings.Contains(outputStr, clusterIP)
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false, fmt.Errorf("failed to get addresses on loopback: %v", err)
+	}
 
-	log.Printf("BGP route check for %s: advertised=%t", clusterIP, isAdvertised)
-	return isAdvertised, nil
+	found := false
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil {
+			continue
+		}
+		if ip.String() == clusterIP {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		log.Printf("ClusterIP %s is NOT on loopback interface", clusterIP)
+		return false, nil
+	}
+
+	log.Printf("ClusterIP %s is on loopback interface", clusterIP)
+
+	// Step 2: Check if BGP is advertising this IP and sourced locally
+	cmd := exec.Command("vtysh", "-c", "show ip bgp " + clusterIP)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to check BGP advertisement for %s: %v\nOutput: %s", clusterIP, err, output)
+	}
+
+	outStr := string(output)
+	isLocal := strings.Contains(outStr, "sourced") && strings.Contains(outStr, "valid")
+
+	log.Printf("BGP advertisement check for %s: sourced locally = %v", clusterIP, isLocal)
+	return isLocal, nil
 }
 
-// advertiseServiceViaBGP advertises a ClusterIP via FRR BGP
+// advertiseServiceViaBGP adds loopback route and configures FRR
 func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	if !c.config.IsBGPEnabled() {
 		log.Printf("BGP is disabled in configuration, skipping advertisement")
 		return nil
 	}
 
-	// Create BGP route advertisement commands
 	route := fmt.Sprintf("%s/32", clusterIP)
+	asn := c.config.GetBGPASN()
+	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
-	// Construct vtysh commands to advertise the route
-	commands := []string{
-		"configure terminal",
-		fmt.Sprintf("ip route %s Null0", route),
-		"router bgp",
-		"redistribute static",
-		"exit",
-		"exit",
+	assignCmd := exec.Command("ip", "addr", "add", route, "dev", "lo")
+	if output, err := assignCmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: failed to assign IP to loopback: %v\nOutput: %s", err, output)
 	}
 
-	// Execute vtysh commands
-	for _, command := range commands {
-		cmd := exec.Command("vtysh", "-c", command)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("failed to execute vtysh command '%s': %v, output: %s", command, err, string(output))
-		}
-		log.Printf("Executed FRR command: %s", command)
+	cmd := exec.Command(
+		"vtysh",
+		"-c", "configure terminal",
+		"-c", fmt.Sprintf("router bgp %d", asn),
+		"-c", "address-family ipv4 unicast",
+		"-c", fmt.Sprintf("network %s", route),
+		"-c", "exit-address-family",
+		"-c", "exit",
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to advertise route via BGP: %v\nOutput: %s", err, output)
+	}
+	log.Printf("vtysh route advertisement successful: %s", output)
+
+	writeCmd := exec.Command("vtysh", "-c", "write memory")
+	if output, err := writeCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to persist config to /etc/frr/frr.conf: %v\nOutput: %s", err, output)
 	}
 
-	log.Printf("Successfully advertised route %s via FRR BGP", route)
+	log.Printf("Successfully advertised %s via BGP and saved config to /etc/frr/frr.conf", route)
 	return nil
 }
 
-// testKubernetesAPI tests connectivity to the Kubernetes API
+// testKubernetesAPI tests Kubernetes API access
 func (c *BGPServiceController) testKubernetesAPI() error {
 	_, err := c.client.CoreV1().Namespaces().List(c.ctx, metav1.ListOptions{Limit: 1})
 	return err
 }
 
-// testFRRConnectivity tests connectivity to FRR
+// testFRRConnectivity tests FRR CLI availability
 func (c *BGPServiceController) testFRRConnectivity() error {
 	cmd := exec.Command("vtysh", "-c", "show version")
 	_, err := cmd.Output()
 	return err
 }
 
-// sleep pauses execution for the configured interval
+// sleep for configured loop interval
 func (c *BGPServiceController) sleep() {
 	select {
 	case <-c.ctx.Done():
