@@ -25,9 +25,12 @@ spec:
           {{- toYaml .Values.resources | nindent 10 }}
         volumeMounts:
         - name: config
-          mountPath: /etc/cosmolet
+          mountPath: /etc/cosmolet/config.yaml
+          subPath: basic-config.yaml
         - name: frr-sockets
           mountPath: /var/run/frr
+        - name: frr-config
+          mountPath: /etc/frr
       volumes:
       - name: config
         configMap:
@@ -35,6 +38,9 @@ spec:
       - name: frr-sockets
         hostPath:
           path: /var/run/frr
+      - name: frr-config
+        hostPath:
+          path: /etc/frr
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
