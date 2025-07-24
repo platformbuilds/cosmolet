@@ -1,13 +1,14 @@
 # Basic configuration for Cosmolet BGP Service Controller
+# kubectl create configmap cosmolet-config   --from-file=examples/basic-config.yaml -n cosmolet
 services:
   namespaces:
-    - "default"
-    - "kube-system"
+    - "haproxy-controller"
 
 loop_interval_seconds: 30
 
 bgp:
   enabled: true
+  asn: 65496  
 
 logging:
   level: "info"
