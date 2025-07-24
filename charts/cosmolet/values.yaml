@@ -2,9 +2,9 @@
 replicaCount: 1
 
 image:
-  repository: cosmolet/cosmolet
+  repository: platformbuilds/cosmolet
   pullPolicy: IfNotPresent
-  tag: ""
+  tag: "latest"
 
 config:
   services:
