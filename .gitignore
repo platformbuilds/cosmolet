@@ -37,3 +37,7 @@ bin/*
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Go Binaries
+go.mod
+go.sum
