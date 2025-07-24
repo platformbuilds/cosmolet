@@ -13,14 +13,17 @@ RUN go mod download
 COPY . .
 
 # Build arguments for versioning
-ARG VERSION=dev
-ARG GIT_COMMIT=unknown
-ARG BUILD_DATE=unknown
+ARG VERSION=beta
+ARG GIT_COMMIT=7e4ebc0
+ARG BUILD_DATE=20250724
+
+# Performing tidy check
+RUN go mod tidy
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-w -s -X main.Version=${VERSION} -X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-    -o cosmolet \
+    -o cosmolet -v \
     ./cmd/cosmolet
 
 # Final stage
