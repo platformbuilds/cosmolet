@@ -54,7 +54,6 @@ func main() {
 		log.Fatalf("NODE_NAME env var must be set via Downward API")
 	}
 
-	// Build k8s client
 	var cfg *rest.Config
 	var err error
 	if kubeconfig != "" {
@@ -67,20 +66,15 @@ func main() {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil { log.Fatalf("failed creating kube client: %v", err) }
 
-	// Shared informer factory
 	factory := informers.NewSharedInformerFactory(client, time.Duration(resyncSeconds)*time.Second)
-
-	// Informers we need
 	svcInf := factory.Core().V1().Services()
 	nodeInf := factory.Core().V1().Nodes()
 	epsInf := factory.Discovery().V1().EndpointSlices()
 
-	stop := make(chan struct{})
-	defer close(stop)
+	stop := make(chan struct{}); defer close(stop)
 	factory.Start(stop)
 	factory.WaitForCacheSync(stop)
 
-	// Metrics HTTP server
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request){ w.WriteHeader(200); w.Write([]byte("ok")) })
@@ -93,7 +87,6 @@ func main() {
 	ensureStatic := getenvBool("FRR_ENSURE_STATIC", true)
 	vtyshPath := getenv("VTYSH_PATH", "/usr/bin/vtysh")
 
-	// Controller
 	ctrl, err := cosmoctrl.NewBGPController(cosmoctrl.Config{
 		NodeName:              nodeName,
 		LoopInterval:          time.Duration(loopIntervalSeconds) * time.Second,
@@ -107,12 +100,9 @@ func main() {
 	})
 	if err != nil { log.Fatalf("failed creating controller: %v", err) }
 
-	// Start reconcile loop
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background()); defer cancel()
 	go ctrl.Run(ctx)
 
-	// Handle termination signals: perform best-effort withdraw
 	sigc := make(chan os.Signal, 2)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc

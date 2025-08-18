@@ -1,13 +1,12 @@
 
 # Operations & Runbook
-## Health
-- `/healthz` and `/readyz` on port 8080.
-- Prometheus metrics: see [metrics.md](metrics.md).
 
-## Failure Drills
-- **Node drain**: VIPs should withdraw from that node when local ready endpoints drop to 0 (eTP=Local).
-- **FRR restart**: controller's periodic reconcile restores `network` lines.
-- **Pod restart**: `preStop` withdraw is best‑effort; reconcile loop self‑heals.
+## Scrape metrics
+- Create Service: [cosmolet-service.yaml](examples/monitoring/cosmolet-service.yaml)
+- ServiceMonitor: [servicemonitor.yaml](examples/monitoring/servicemonitor.yaml)
 
-## Rolling Upgrades
-- DaemonSet rolling updates are safe. Observe VIP path counts on ToR/Core during rollout.
+## Alerts
+- Import Prometheus rules: [prometheus-rules.yaml](examples/monitoring/prometheus-rules.yaml)
+
+## Failure drills
+- Test Local/Cluster Services: [svc-lb-local.yaml](examples/k8s/svc-lb-local.yaml), [svc-lb-cluster.yaml](examples/k8s/svc-lb-cluster.yaml)

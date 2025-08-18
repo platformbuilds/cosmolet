@@ -1,0 +1,10 @@
+
+image:
+  repository: ghcr.io/platformbuilds/cosmolet
+  tag: v0.1.0
+config:
+  loopIntervalSeconds: 20
+  bgp:
+    asn: 65101
+  frr:
+    ensureStatic: true

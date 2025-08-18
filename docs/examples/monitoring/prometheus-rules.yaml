@@ -1,0 +1,16 @@
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cosmolet-alerts
+  namespace: observability
+spec:
+  groups:
+  - name: cosmolet
+    rules:
+    - alert: CosmoletVipFlap
+      expr: rate(cosmolet_vip_advertised_total[5m]) + rate(cosmolet_vip_withdrawn_total[5m]) > 5
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "Cosmolet VIP announcements flapping"

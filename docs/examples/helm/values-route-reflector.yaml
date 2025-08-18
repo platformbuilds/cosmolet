@@ -1,0 +1,11 @@
+
+image:
+  repository: ghcr.io/platformbuilds/cosmolet
+  tag: v0.1.0
+config:
+  bgp:
+    asn: 65001
+  frr:
+    ensureStatic: true
+securityContext:
+  privileged: true

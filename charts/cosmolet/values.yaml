@@ -9,8 +9,6 @@ config:
   bgp:
     asn: 65001
   frr:
-    socketPath: /var/run/frr
-    configPath: /etc/frr
     ensureStatic: true
 
 securityContext:

@@ -1,16 +1,13 @@
 
 # FRR & Fabric Configuration
-On **each node** running FRR:
-- Enable ECMP:
-  ```
-  router bgp <ASN>
-   bgp bestpath as-path multipath-relax
-   maximum-paths 8
-  ```
-- Do **not** globally `redistribute connected` or `static`. Cosmolet injects explicit `network` statements.
 
-On **ToR/Core**:
-- Peer with all nodes (or via route reflectors).
-- Enable ECMP for VIP prefixes and set policies to keep attributes (LocalPref/MED) uniform.
+**Node FRR configs:**
+- Single ToR: [node-frr-single-tor.conf](examples/frr/node-frr-single-tor.conf)
+- Dual ToR: [node-frr-dual-tor.conf](examples/frr/node-frr-dual-tor.conf)
+- iBGP to RRs: [node-frr-rr.conf](examples/frr/node-frr-rr.conf)
 
-Cosmolet can optionally place a **static Null0** route before `network` to ensure origination even if the VIP is not locally bound.
+**Fabric configs:**
+- ToR eBGP: [tor-frr-ebgp.conf](examples/frr/tor-frr-ebgp.conf)
+- Route Reflector iBGP: [rr-frr-ibgp.conf](examples/frr/rr-frr-ibgp.conf)
+
+**Guard rails:** Do not `redistribute connected/static` globally; Cosmolet injects explicit `network` lines only.

@@ -1,0 +1,15 @@
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-clusterip
+  namespace: demo
+  annotations:
+    cosmolet.platformbuilds.io/announce: "true"
+spec:
+  type: ClusterIP
+  selector: { app: web }
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080

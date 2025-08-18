@@ -1,7 +1,9 @@
 
 # Helm Quickstart
+
 ```bash
-helm upgrade --install cosmolet ./charts/cosmolet -n kube-system   --set config.bgp.asn=65001   --set securityContext.privileged=true
+# Choose a values file in docs/examples/helm/
+helm upgrade --install cosmolet ./charts/cosmolet -n kube-system   -f docs/examples/helm/values-single-tor.yaml
 ```
-- Metrics are exposed at `:8080/metrics` in‑pod (hostNetwork=true). Create a Service/ServiceMonitor if needed.
-- Customize values in [values.md](values.md).
+
+See the **values reference** and more variants in: [values.md](values.md) and [examples/helm](../examples/helm/).

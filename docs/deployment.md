@@ -1,31 +1,23 @@
 
 # Deployment Guide
-## Prerequisites
-- Kubernetes 1.22+
-- FRR installed and running on each node (with BGP sessions to ToR/Core).
-- ToR/Core configured for ECMP (see [frr-config.md](frr-config.md)).
-- Helm.
+
+## Pick a topology and values
+Use one of the prebuilt Helm values:
+- Single ToR eBGP: [values-single-tor.yaml](examples/helm/values-single-tor.yaml)
+- Dual ToR eBGP: [values-dual-tor.yaml](examples/helm/values-dual-tor.yaml)
+- Route Reflector (iBGP): [values-route-reflector.yaml](examples/helm/values-route-reflector.yaml)
+- Dual-stack: [values-dualstack.yaml](examples/helm/values-dualstack.yaml)
 
 ## Install
 ```bash
-helm upgrade --install cosmolet ./charts/cosmolet -n kube-system   --set config.bgp.asn=65001   --set securityContext.privileged=true
+helm upgrade --install cosmolet ./charts/cosmolet -n kube-system -f docs/examples/helm/values-single-tor.yaml
 ```
 
-## Verify
-1. **Pods running**:
-   ```bash
-   kubectl -n kube-system get ds cosmolet
-   kubectl -n kube-system get pods -l app.kubernetes.io/name=cosmolet -o wide
-   ```
-2. **BGP sessions up** (on ToR/Core and node FRR):
-   ```bash
-   vtysh -c "show ip bgp summary"
-   ```
-3. **Create a Service** and confirm VIP is learned upstream:
-   ```bash
-   kubectl -n demo apply -f ../docs/examples/svc-nginx-lb-local.yaml
-   vtysh -c "show ip bgp <VIP>"
-   ```
+## Post-install checks
+- Node FRR: `vtysh -c "show ip bgp summary"`
+- Fabric FRR: verify `maximum-paths` and ECMP; configs: [ToR](examples/frr/tor-frr-ebgp.conf), [RR](examples/frr/rr-frr-ibgp.conf).
 
-## Upgrades
-- Cosmolet is stateless; rolling updates are safe. See [operations.md](operations.md) for failure drills.
+## Create Services
+- Local: [svc-lb-local.yaml](examples/k8s/svc-lb-local.yaml)
+- Cluster: [svc-lb-cluster.yaml](examples/k8s/svc-lb-cluster.yaml)
+- Dual-stack: [svc-dualstack-lb.yaml](examples/k8s/svc-dualstack-lb.yaml)

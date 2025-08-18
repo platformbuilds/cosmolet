@@ -6,18 +6,16 @@ import (
 	"net"
 )
 
-// Manager is an interface for programming FRR on the *local* node.
 type Manager interface {
 	AnnounceVIP(ip net.IP, prefixLen int) error
 	WithdrawVIP(ip net.IP, prefixLen int) error
-	ListAnnounced() (map[string]bool, error) // ip/cidr string -> true
+	ListAnnounced() (map[string]bool, error)
 }
 
-// Config contains minimal knobs for FRR programming.
 type Config struct {
 	ASN          int
-	VTYSHPath    string // default: /usr/bin/vtysh
-	EnsureStatic bool   // ensure static Null0 for the VIP before 'network'
+	VTYSHPath    string
+	EnsureStatic bool
 }
 
 func ipFamily(ip net.IP) string {
@@ -25,7 +23,6 @@ func ipFamily(ip net.IP) string {
 	return "ipv6"
 }
 
-// Key renders canonical CIDR string.
 func Key(ip net.IP, prefixLen int) string {
 	return fmt.Sprintf("%s/%d", ip.String(), prefixLen)
 }

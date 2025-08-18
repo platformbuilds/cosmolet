@@ -1,22 +1,9 @@
 
 # Traffic Model (Ingress & Egress)
-## Inbound (Cosmolet's Scope)
-- Originates BGP routes for Service VIPs from each node.
-- ECMP upstream enables scale and resilience.
-- Health‑gated per `eTP` and local readiness.
 
-## Outbound (Kubernetes/CNI)
-- Handled by your CNI, kube‑proxy (IPVS/iptables), or service mesh.
-- Common patterns:
-  - Node SNAT (default)
-  - Cilium Egress Gateway
-  - Calico Egress / Calico BGP
-  - Mesh Egress Gateway
+- **Ingress (Cosmolet)**: BGP advertise VIPs from each node for ECMP.
+  - Try: [LB Local](examples/k8s/svc-lb-local.yaml) for strict locality, or [LB Cluster](examples/k8s/svc-lb-cluster.yaml) for ECMP everywhere.
+  - Dual-stack: [svc-dualstack-lb.yaml](examples/k8s/svc-dualstack-lb.yaml).
 
-## Symmetry Considerations
-- **eTP=Local**: preserves locality and symmetric returns.
-- **eTP=Cluster**: may lead to asymmetric return paths; ensure NAT/routing tolerates this or prefer Local.
-
-## Dual‑Stack
-- VIPs are advertised independently as `/32` (IPv4) and `/128` (IPv6).
-- Ensure `address-family ipv6 unicast` is enabled in FRR and ToR.
+- **Egress (CNI / kube-proxy / mesh)**: Out of scope for Cosmolet.
+  - If advertising **ClusterIP** VIPs, enable IPVS strict ARP: [kube-proxy IPVS ConfigMap](examples/k8s/kube-proxy-ipvs-configmap.yaml).

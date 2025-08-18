@@ -21,9 +21,7 @@ func TestShouldAdvertise_LocalPolicy(t *testing.T) {
 	es := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{discoveryv1.LabelServiceName: "svc"}},
 		AddressType: discoveryv1.AddressTypeIPv4,
-		Endpoints: []discoveryv1.Endpoint{
-			{NodeName: &node, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)}},
-		},
+		Endpoints: []discoveryv1.Endpoint{{NodeName: &node, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)}}},
 	}
 	ok := ShouldAdvertise(node, svc, []*discoveryv1.EndpointSlice{es}, PolicyAuto, true, false, nil)
 	if !ok { t.Fatalf("expected advertise when local ready endpoint exists") }
@@ -41,9 +39,7 @@ func TestShouldAdvertise_LocalPolicy_NoLocalReady(t *testing.T) {
 	es := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{discoveryv1.LabelServiceName: "svc"}},
 		AddressType: discoveryv1.AddressTypeIPv4,
-		Endpoints: []discoveryv1.Endpoint{
-			{NodeName: &node, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(false)}},
-		},
+		Endpoints: []discoveryv1.Endpoint{{NodeName: &node, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(false)}}},
 	}
 	ok := ShouldAdvertise(node, svc, []*discoveryv1.EndpointSlice{es}, PolicyAuto, true, false, nil)
 	if ok { t.Fatalf("expected NOT advertise when no local ready endpoint") }
