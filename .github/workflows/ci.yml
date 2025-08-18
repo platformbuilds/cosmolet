@@ -1,0 +1,58 @@
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-lint-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install deps
+        run: make deps
+
+      - name: Lint
+        run: make lint
+
+      - name: Security
+        run: make security
+
+      - name: Unit tests
+        run: make test
+
+      - name: Build (sanity)
+        run: make build
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f dist/coverage.out ]; then
+            go tool cover -func=dist/coverage.out | tail -n 1
+          else
+            echo "No coverage file found."
+          fi
+
+      - name: Upload coverage HTML (if generated)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: dist/coverage.html
+          if-no-files-found: ignore
