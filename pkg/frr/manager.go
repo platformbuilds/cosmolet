@@ -1,4 +1,3 @@
-
 package frr
 
 import (
@@ -19,7 +18,9 @@ type Config struct {
 }
 
 func ipFamily(ip net.IP) string {
-	if ip.To4() != nil { return "ipv4" }
+	if ip.To4() != nil {
+		return "ipv4"
+	}
 	return "ipv6"
 }
 

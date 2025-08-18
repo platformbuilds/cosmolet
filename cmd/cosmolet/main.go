@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -23,19 +22,27 @@ import (
 
 func getenvInt(name string, def int) int {
 	if v := os.Getenv(name); v != "" {
-		if n, err := strconv.Atoi(v); err == nil { return n }
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
 func getenvBool(name string, def bool) bool {
 	if v := os.Getenv(name); v != "" {
-		if v == "1" || v == "true" || v == "TRUE" { return true }
-		if v == "0" || v == "false" || v == "FALSE" { return false }
+		if v == "1" || v == "true" || v == "TRUE" {
+			return true
+		}
+		if v == "0" || v == "false" || v == "FALSE" {
+			return false
+		}
 	}
 	return def
 }
 func getenv(name, def string) string {
-	if v := os.Getenv(name); v != "" { return v }
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
 	return def
 }
 
@@ -61,26 +68,43 @@ func main() {
 	} else {
 		cfg, err = rest.InClusterConfig()
 	}
-	if err != nil { log.Fatalf("failed building kube config: %v", err) }
+	if err != nil {
+		log.Fatalf("failed building kube config: %v", err)
+	}
 
 	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil { log.Fatalf("failed creating kube client: %v", err) }
+	if err != nil {
+		log.Fatalf("failed creating kube client: %v", err)
+	}
 
 	factory := informers.NewSharedInformerFactory(client, time.Duration(resyncSeconds)*time.Second)
 	svcInf := factory.Core().V1().Services()
 	nodeInf := factory.Core().V1().Nodes()
 	epsInf := factory.Discovery().V1().EndpointSlices()
 
-	stop := make(chan struct{}); defer close(stop)
+	stop := make(chan struct{})
+	defer close(stop)
 	factory.Start(stop)
 	factory.WaitForCacheSync(stop)
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request){ w.WriteHeader(200); w.Write([]byte("ok")) })
-		http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request){ w.WriteHeader(200); w.Write([]byte("ready")) })
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte("ok")); err != nil {
+				log.Printf("error writing /healthz response: %v", err)
+			}
+		})
+		http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte("ready")); err != nil {
+				log.Printf("error writing /readyz response: %v", err)
+			}
+		})
 		log.Printf("Metrics listening on :8080")
-		_ = http.ListenAndServe(":8080", nil)
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatalf("HTTP server error: %v", err)
+		}
 	}()
 
 	asn := getenvInt("BGP_ASN", 65001)
@@ -98,9 +122,12 @@ func main() {
 		EnsureStatic:          ensureStatic,
 		VTYSHPath:             vtyshPath,
 	})
-	if err != nil { log.Fatalf("failed creating controller: %v", err) }
+	if err != nil {
+		log.Fatalf("failed creating controller: %v", err)
+	}
 
-	ctx, cancel := context.WithCancel(context.Background()); defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go ctrl.Run(ctx)
 
 	sigc := make(chan os.Signal, 2)

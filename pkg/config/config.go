@@ -3,7 +3,6 @@ package config
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 
 	"gopkg.in/yaml.v2"
@@ -68,8 +67,8 @@ func LoadConfig(configPath string) (*Config, error) {
 		return config, nil
 	}
 
-	// Read config file
-	data, err := ioutil.ReadFile(configPath)
+	// Read config file (use os.ReadFile instead of deprecated ioutil.ReadFile)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %v", configPath, err)
 	}

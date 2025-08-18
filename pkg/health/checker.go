@@ -154,9 +154,19 @@ func (h *Checker) LivenessHandler(w http.ResponseWriter, r *http.Request) {
 		Uptime:    time.Since(h.started).String(),
 	}
 
+	// Marshal first so we can set the correct status even if encoding fails
+	data, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "failed to encode liveness response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	if _, err := w.Write(data); err != nil {
+		// Best effort: cannot change status after headers are sent; surface as 500 body for observability
+		http.Error(w, "failed to write liveness response: "+err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // ReadinessHandler handles readiness probe requests
@@ -194,9 +204,18 @@ func (h *Checker) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 		Checks:    checks,
 	}
 
+	// Marshal first so we can set the correct status even if encoding fails
+	data, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "failed to encode readiness response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	if _, err := w.Write(data); err != nil {
+		http.Error(w, "failed to write readiness response: "+err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // CheckKubernetesAPI checks if Kubernetes API is accessible
