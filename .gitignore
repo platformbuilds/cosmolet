@@ -41,3 +41,7 @@ bin/*
 # Go Binaries
 go.mod
 go.sum
+
+# backups and zips
+*.zip
+*.bak
