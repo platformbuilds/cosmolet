@@ -4,6 +4,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v2"
 )
@@ -60,22 +62,35 @@ func LoadConfig(configPath string) (*Config, error) {
 		},
 	}
 
+	// --- Path validation / normalization for gosec G304 ---
+	p := filepath.Clean(configPath)
+	// require .yaml/.yml extension to narrow file types
+	if ext := strings.ToLower(filepath.Ext(p)); ext != ".yaml" && ext != ".yml" {
+		return nil, fmt.Errorf("config must be a .yaml or .yml file: %q", p)
+	}
+	// make absolute to avoid traversal surprises
+	if !filepath.IsAbs(p) {
+		cwd, _ := os.Getwd()
+		p = filepath.Join(cwd, p)
+	}
+
 	// Check if config file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+	if _, err := os.Stat(p); os.IsNotExist(err) {
 		// File doesn't exist, use defaults with warning
-		fmt.Printf("Warning: Config file %s not found, using defaults\n", configPath)
+		fmt.Printf("Warning: Config file %s not found, using defaults\n", p)
 		return config, nil
 	}
 
-	// Read config file (use os.ReadFile instead of deprecated ioutil.ReadFile)
-	data, err := os.ReadFile(configPath)
+	// Read config file
+	// #nosec G304 -- the path p has been cleaned, made absolute, and extension-validated above.
+	data, err := os.ReadFile(p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %v", configPath, err)
+		return nil, fmt.Errorf("failed to read config file %s: %v", p, err)
 	}
 
 	// Parse YAML
 	if err := yaml.Unmarshal(data, config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file %s: %v", configPath, err)
+		return nil, fmt.Errorf("failed to parse config file %s: %v", p, err)
 	}
 
 	// Validate configuration

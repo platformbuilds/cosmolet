@@ -2,6 +2,8 @@ module github.com/platformbuilds/cosmolet
 
 go 1.23.0
 
+toolchain go1.23.10
+
 require (
 	github.com/prometheus/client_golang v1.23.0
 	gopkg.in/yaml.v2 v2.4.0

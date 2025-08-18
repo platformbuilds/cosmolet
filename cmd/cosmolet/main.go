@@ -87,6 +87,7 @@ func main() {
 	factory.Start(stop)
 	factory.WaitForCacheSync(stop)
 
+	// Metrics and health HTTP server with timeouts (gosec G114 fix)
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -101,8 +102,17 @@ func main() {
 				log.Printf("error writing /readyz response: %v", err)
 			}
 		})
-		log.Printf("Metrics listening on :8080")
-		if err := http.ListenAndServe(":8080", nil); err != nil {
+
+		srv := &http.Server{
+			Addr:              ":8080",
+			Handler:           nil, // default mux
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		log.Printf("Metrics listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 	}()
