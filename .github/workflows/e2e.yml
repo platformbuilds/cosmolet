@@ -1,0 +1,246 @@
+name: e2e
+
+on:
+  push:
+    branches: ['**']              # run CI on every branch push
+    tags: ['release/*-v*']        # dev/alpha/beta/mark tags
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Lint/Security/Test/Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go (patched 1.23 line)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.10'
+          check-latest: true
+          cache: true
+
+      - name: Show Go env
+        run: |
+          go version
+          go env
+
+      - name: Deps (tidy, download, verify)
+        run: make deps
+
+      - name: Lint (6m timeout + PR annotations)
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.0
+          golangci-lint --version
+          golangci-lint run ./... --timeout=6m --out-format=github-actions
+
+      - name: Security
+        run: make security
+
+      - name: Unit tests
+        run: make test
+
+      - name: Build (sanity)
+        run: make build
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f dist/coverage.out ]; then
+            go tool cover -func=dist/coverage.out | tail -n 1
+          else
+            echo "No coverage file found."
+          fi
+
+      - name: Upload coverage HTML (if generated)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: dist/coverage.html
+          if-no-files-found: ignore
+
+  approve_release:
+    # Only for tag pushes by repo owner, and only for alpha/beta/mark (dev is local-only: no release jobs)
+    if: >
+      github.ref_type == 'tag' &&
+      (startsWith(github.ref_name, 'release/alpha-v') ||
+       startsWith(github.ref_name, 'release/beta-v')  ||
+       startsWith(github.ref_name, 'release/mark-v')) &&
+      github.triggering_actor == github.repository_owner
+    needs: [ci]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history to inspect branches
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag format, find source branch, and enforce match
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_TAG="${GITHUB_REF_NAME}"   # e.g. release/alpha-v1-2-3
+          echo "RAW_TAG=${RAW_TAG}" >> "$GITHUB_ENV"
+
+          # Validate tag format: release/<channel>-vMAJOR-MINOR-BUGFIX
+          if [[ ! "${RAW_TAG}" =~ ^release/(alpha|beta|mark)-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            echo "❌ Invalid release tag: ${RAW_TAG}"
+            echo "Allowed channels for releases: alpha|beta|mark"
+            exit 1
+          fi
+
+          CHANNEL="${RAW_TAG#release/}"; CHANNEL="${CHANNEL%%-*}"     # alpha|beta|mark
+          VERSION="${RAW_TAG#release/${CHANNEL}-}"                    # v1-2-3
+          echo "CHANNEL=${CHANNEL}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+          # Determine a remote branch that contains the tagged commit.
+          git fetch --all --tags --prune
+          COMMIT_SHA="$(git rev-list -n1 "${RAW_TAG}")"
+          if [[ -z "${COMMIT_SHA}" ]]; then
+            echo "❌ Could not resolve commit for tag ${RAW_TAG}"
+            exit 1
+          fi
+
+          # Pick the first origin/* branch that contains the commit.
+          SRC_BRANCH="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/* --contains "${COMMIT_SHA}" | head -n1)"
+          if [[ -z "${SRC_BRANCH}" ]]; then
+            echo "❌ No remote branch contains commit ${COMMIT_SHA}. Ensure the tag points to a branch tip."
+            exit 1
+          fi
+          # Drop 'origin/' prefix
+          SRC_BRANCH="${SRC_BRANCH#origin/}"
+          echo "SOURCE_BRANCH=${SRC_BRANCH}" >> "$GITHUB_ENV"
+
+          echo "✅ Tag: ${RAW_TAG}"
+          echo "✅ Channel: ${CHANNEL}"
+          echo "✅ Version: ${VERSION}"
+          echo "✅ Source branch: ${SRC_BRANCH}"
+
+          # Enforce branch-name patterns by channel:
+          #  feature/<channel>-vX-Y-Z, bug/<channel>-vX-Y-Z, enhancement/<channel>-vX-Y-Z
+          case "${CHANNEL}" in
+            alpha|beta|mark)
+              if [[ ! "${SRC_BRANCH}" =~ ^(feature|bug|enhancement)/${CHANNEL}-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+                echo "❌ Branch '${SRC_BRANCH}' does not match required pattern for channel '${CHANNEL}'."
+                echo "Expected: feature|bug|enhancement/${CHANNEL}-vMAJOR-MINOR-BUGFIX"
+                exit 1
+              fi
+              ;;
+          esac
+
+          # Enforce tag version == branch version
+          BR_VER="${SRC_BRANCH##*/}"     # <channel>-vX-Y-Z
+          BR_VER="${BR_VER#${CHANNEL}-}" # vX-Y-Z
+          if [[ "${BR_VER}" != "${VERSION}" ]]; then
+            echo "❌ Version mismatch: tag=${VERSION}, branch=${BR_VER}"
+            exit 1
+          fi
+
+          echo "✅ Tag and branch versions match."
+
+      - run: echo "Release gated by environment approval."
+
+  build_binaries:
+    # Runs for owner-only tags; approve_release must pass (includes tag↔branch validation).
+    if: github.ref_type == 'tag' && github.triggering_actor == github.repository_owner
+    needs: [approve_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go (patched 1.23 line)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.10'
+          check-latest: true
+          cache: true
+
+      - name: Export tag env (redundant safety)
+        shell: bash
+        run: |
+          echo "RAW_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          CH="${RAW_TAG#release/}"; CH="${CH%%-*}"
+          echo "CHANNEL=${CH}" >> "$GITHUB_ENV"
+          echo "VERSION=${RAW_TAG#release/${CH}-}" >> "$GITHUB_ENV"
+
+      - name: Build multi-arch binaries (Makefile)
+        run: make build-multi
+
+      - name: Create GitHub Release (idempotent)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RAW_TAG }}
+          name: Cosmolet ${{ env.VERSION }}
+          generate_release_notes: true
+
+      - name: Upload binaries to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RAW_TAG }}
+          files: |
+            dist/cosmolet-*
+
+  docker_multiarch:
+    # Same channel/owner gate as approve_release (dev never reaches here).
+    if: >
+      github.ref_type == 'tag' &&
+      (startsWith(github.ref_name, 'release/alpha-v') ||
+       startsWith(github.ref_name, 'release/beta-v')  ||
+       startsWith(github.ref_name, 'release/mark-v')) &&
+      github.triggering_actor == github.repository_owner
+    needs: [approve_release]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Export tag env (same logic)
+        shell: bash
+        run: |
+          echo "RAW_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          CH="${GITHUB_REF_NAME#release/}"; CH="${CH%%-*}"
+          echo "CHANNEL=${CH}" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME#release/${CH}-}" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image repo
+        run: echo "IMAGE_REPO_LC=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build & Push multi-arch image (Makefile)
+        env:
+          DOCKER_REGISTRY: ghcr.io
+          DOCKER_REPOSITORY: ${{ env.IMAGE_REPO_LC }}
+          IMAGE_TAGS: ${{ env.VERSION }},${{ env.RAW_TAG }}
+          PLATFORMS: linux/amd64,linux/arm64
+        run: make docker-buildx
