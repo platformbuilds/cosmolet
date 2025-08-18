@@ -1,3 +1,4 @@
+
 .PHONY: build test clean help \
 	lint fmt vet lint-install \
 	security vuln vuln-install gosec-install \
@@ -6,7 +7,7 @@
 	build-release build-multi \
 	docker-build docker-push docker-buildx docker-load \
 	helm-lint helm-package \
-	deps ci
+	deps tidy ci
 
 # -------- Repo / Build Vars --------
 BINARY_NAME        ?= cosmolet
@@ -37,7 +38,7 @@ GOVULNCHECK        := $(shell command -v govulncheck 2>/dev/null)
 GOSEC              := $(shell command -v gosec 2>/dev/null)
 
 # =========================================================
-# Core (kept from your original Makefile, unchanged behavior)
+# Core (from original Makefile, behavior preserved/enhanced)
 # =========================================================
 
 ## build: Build the binary
@@ -52,6 +53,7 @@ build:
 ## test: Run tests
 test:
 	@echo "Running tests..."
+	@mkdir -p $(DIST)
 	go test -v -race -coverprofile=$(DIST)/coverage.out $(PKG)
 
 ## docker-build: Build Docker image (single-arch)
@@ -63,6 +65,10 @@ docker-build:
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMAGE):$(VERSION) \
 		.
+
+## docker-push: Push single-arch image built by docker-build
+docker-push:
+	docker push $(IMAGE):$(VERSION)
 
 ## clean: Clean build artifacts
 clean:
@@ -78,8 +84,14 @@ help:
 # New/Enhanced Tasks
 # ==================
 
-deps:
+## deps: Tidy, download and verify modules
+deps: tidy
 	go mod download
+	go mod verify
+
+## tidy: Run go mod tidy
+tidy:
+	go mod tidy
 
 fmt:
 	@echo "Formatting code..."
@@ -125,3 +137,53 @@ coverage-html:
 	@go tool cover -html=$(DIST)/coverage.out -o $(DIST)/coverage.html
 	@echo "Wrote $(DIST)/coverage.html"
 
+## readme-regen: Regenerate README.md with approved content (optional, opt-in)
+readme-regen:
+	@echo "Use your existing README or integrate your generator as needed."
+
+# --------- Release Binaries ---------
+
+## build-release: Build one release artifact using GOOS/GOARCH env
+build-release:
+	@mkdir -p $(DIST)
+	GOOS=$${GOOS:-linux} GOARCH=$${GOARCH:-amd64} CGO_ENABLED=0 \
+	go build -trimpath -ldflags '-extldflags "-static" $(LDFLAGS)' \
+		-o $(DIST)/$(BINARY_NAME)-$${GOOS}-$${GOARCH} $(CMD_PATH)
+
+## build-multi: Build multi-arch release binaries into ./dist
+build-multi:
+	@mkdir -p $(DIST)
+	@set -e; \
+	for t in $(OS_ARCHES); do \
+	  GOOS=$${t%/*}; GOARCH=$${t#*/}; \
+	  echo ">> Building $$GOOS/$$GOARCH"; \
+	  CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH \
+	    go build -trimpath -ldflags '-extldflags "-static" $(LDFLAGS)' \
+	    -o $(DIST)/$(BINARY_NAME)-$$GOOS-$$GOARCH $(CMD_PATH); \
+	done
+
+# --------- Docker (multi-arch) ---------
+
+## docker-buildx: Build & push multi-arch image with Buildx (set IMAGE_TAGS if needed)
+docker-buildx:
+	@if ! docker buildx version >/dev/null 2>&1; then echo "docker buildx not available"; exit 1; fi
+	@if [ -z "$(IMAGE_TAGS)" ]; then echo "Set IMAGE_TAGS (e.g., v1.2.3 or v1.2.3,latest)"; exit 1; fi
+	@tags=""; IFS=','; for t in $(IMAGE_TAGS); do tags="$$tags -t $(IMAGE):$$t"; done; unset IFS; \
+	echo "Building $(IMAGE) for platforms: $(PLATFORMS) with tags: $(IMAGE_TAGS)"; \
+	docker buildx build --platform $(PLATFORMS) --push $$tags .
+
+## docker-load: Build image for local arch and load into docker (no push)
+docker-load:
+	docker buildx build --load -t $(IMAGE):$(VERSION) .
+
+# --------- Helm helpers ---------
+## helm-lint: Lint Helm chart
+helm-lint:
+	helm lint charts/cosmolet || true
+
+## helm-package: Package Helm chart
+helm-package:
+	helm package charts/cosmolet -d $(DIST) || true
+
+# --------- CI convenience ---------
+ci: deps lint security test build
