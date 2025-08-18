@@ -1,10 +1,22 @@
-name: e2e
+name: CI + Release
 
 on:
   push:
-    branches: ['**']              # run CI on every branch push
-    tags: ['release/*-v*']        # dev/alpha/beta/mark tags
+    branches: ['**']               # CI on every branch
+    tags: ['release/*-v*']         # dev/alpha/beta/mark
   pull_request: {}
+  # Manual entry point for the repo owner to prepare/approve releases and (optionally) create the tag.
+  workflow_dispatch:
+    inputs:
+      create_tag:
+        description: 'Create release tag from the current branch name (owner only)'
+        type: boolean
+        default: false
+      ref:
+        description: 'Branch to prepare a release from (defaults to the currently selected branch)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -67,8 +79,101 @@ jobs:
           path: dist/coverage.html
           if-no-files-found: ignore
 
+  # Manual owner-only entry point to approve/prepare a release and (optionally) create the tag
+  prepare_or_approve_release:
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create tags
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref_name }}
+
+      - name: Determine branch to release from
+        id: branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BR="${{ inputs.ref || github.ref_name }}"
+          # Normalize: strips refs/heads/ if present (workflow_dispatch 'ref' may be either form)
+          BR="${BR#refs/heads/}"
+          echo "branch=${BR}" >> "$GITHUB_OUTPUT"
+          echo "Working on branch: ${BR}"
+
+      - name: Validate branch naming & derive channel/version
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          BR="${{ steps.branch.outputs.branch }}"
+          # Allowed branch prefixes by channel
+          # Dev (local only – can prepare, but tag creation will be blocked)
+          if [[ "${BR}" =~ ^(feature|bug|enhancement)/dev-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            CHANNEL="dev"
+            VERSION="${BR##*/}"           # dev-vX-Y-Z
+            VERSION="${VERSION#dev-}"     # vX-Y-Z
+          # Alpha/Beta/Mark (eligible for releases)
+          elif [[ "${BR}" =~ ^(feature|bug|enhancement)/alpha-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            CHANNEL="alpha"
+            VERSION="${BR##*/}"
+            VERSION="${VERSION#alpha-}"
+          elif [[ "${BR}" =~ ^(feature|bug|enhancement)/beta-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            CHANNEL="beta"
+            VERSION="${BR##*/}"
+            VERSION="${VERSION#beta-}"
+          elif [[ "${BR}" =~ ^(feature|bug|enhancement)/mark-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            CHANNEL="mark"
+            VERSION="${BR##*/}"
+            VERSION="${VERSION#mark-}"
+          else
+            echo "❌ Branch '${BR}' does not match any allowed pattern:"
+            echo "   feature|bug|enhancement/{dev|alpha|beta|mark}-vMAJOR-MINOR-BUGFIX"
+            exit 1
+          fi
+
+          echo "CHANNEL=${CHANNEL}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "PROPOSED_TAG=release/${CHANNEL}-${VERSION}" >> "$GITHUB_ENV"
+
+          echo "✅ Derived:"
+          echo "   CHANNEL=${CHANNEL}"
+          echo "   VERSION=${VERSION}"
+          echo "   PROPOSED_TAG=release/${CHANNEL}-${VERSION}"
+
+          if [[ "${CHANNEL}" == "dev" ]]; then
+            echo "ℹ️ Dev channel is local-only. You may NOT create a release tag."
+          fi
+
+      - name: (Optional) Create release tag from branch
+        if: inputs.create_tag == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${CHANNEL}" == "dev" ]]; then
+            echo "❌ Dev tags are local-only; refusing to create tag."
+            exit 1
+          fi
+
+          TAG="release/${CHANNEL}-${VERSION}"     # e.g., release/alpha-v1-2-3
+          echo "Creating tag '${TAG}' from HEAD of '${{ steps.branch.outputs.branch }}'..."
+
+          # Create annotated tag locally and push, or use API via gh:
+          git config user.name  "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          # Ensure we tag the current HEAD (already checked out to the requested ref)
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+          echo "✅ Created and pushed tag: ${TAG}"
+          echo "NOTE: This will trigger a new workflow run that performs the release."
+
   approve_release:
-    # Only for tag pushes by repo owner, and only for alpha/beta/mark (dev is local-only: no release jobs)
+    # Release jobs run only on alpha/beta/mark tags (dev never reaches here).
     if: >
       github.ref_type == 'tag' &&
       (startsWith(github.ref_name, 'release/alpha-v') ||
@@ -77,11 +182,11 @@ jobs:
       github.triggering_actor == github.repository_owner
     needs: [ci]
     runs-on: ubuntu-latest
-    environment: release
+    environment: release   # manual environment approval step
     permissions:
       contents: read
     steps:
-      - name: Checkout full history to inspect branches
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -94,10 +199,9 @@ jobs:
           RAW_TAG="${GITHUB_REF_NAME}"   # e.g. release/alpha-v1-2-3
           echo "RAW_TAG=${RAW_TAG}" >> "$GITHUB_ENV"
 
-          # Validate tag format: release/<channel>-vMAJOR-MINOR-BUGFIX
+          # Validate tag format
           if [[ ! "${RAW_TAG}" =~ ^release/(alpha|beta|mark)-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
             echo "❌ Invalid release tag: ${RAW_TAG}"
-            echo "Allowed channels for releases: alpha|beta|mark"
             exit 1
           fi
 
@@ -106,7 +210,6 @@ jobs:
           echo "CHANNEL=${CHANNEL}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
-          # Determine a remote branch that contains the tagged commit.
           git fetch --all --tags --prune
           COMMIT_SHA="$(git rev-list -n1 "${RAW_TAG}")"
           if [[ -z "${COMMIT_SHA}" ]]; then
@@ -114,32 +217,19 @@ jobs:
             exit 1
           fi
 
-          # Pick the first origin/* branch that contains the commit.
           SRC_BRANCH="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/* --contains "${COMMIT_SHA}" | head -n1)"
           if [[ -z "${SRC_BRANCH}" ]]; then
             echo "❌ No remote branch contains commit ${COMMIT_SHA}. Ensure the tag points to a branch tip."
             exit 1
           fi
-          # Drop 'origin/' prefix
           SRC_BRANCH="${SRC_BRANCH#origin/}"
           echo "SOURCE_BRANCH=${SRC_BRANCH}" >> "$GITHUB_ENV"
 
-          echo "✅ Tag: ${RAW_TAG}"
-          echo "✅ Channel: ${CHANNEL}"
-          echo "✅ Version: ${VERSION}"
-          echo "✅ Source branch: ${SRC_BRANCH}"
-
-          # Enforce branch-name patterns by channel:
-          #  feature/<channel>-vX-Y-Z, bug/<channel>-vX-Y-Z, enhancement/<channel>-vX-Y-Z
-          case "${CHANNEL}" in
-            alpha|beta|mark)
-              if [[ ! "${SRC_BRANCH}" =~ ^(feature|bug|enhancement)/${CHANNEL}-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
-                echo "❌ Branch '${SRC_BRANCH}' does not match required pattern for channel '${CHANNEL}'."
-                echo "Expected: feature|bug|enhancement/${CHANNEL}-vMAJOR-MINOR-BUGFIX"
-                exit 1
-              fi
-              ;;
-          esac
+          # Enforce allowed branch patterns for this channel
+          if [[ ! "${SRC_BRANCH}" =~ ^(feature|bug|enhancement)/${CHANNEL}-v[0-9]+-[0-9]+-[0-9]+$ ]]; then
+            echo "❌ Branch '${SRC_BRANCH}' does not match required pattern for '${CHANNEL}'."
+            exit 1
+          fi
 
           # Enforce tag version == branch version
           BR_VER="${SRC_BRANCH##*/}"     # <channel>-vX-Y-Z
@@ -151,10 +241,7 @@ jobs:
 
           echo "✅ Tag and branch versions match."
 
-      - run: echo "Release gated by environment approval."
-
   build_binaries:
-    # Runs for owner-only tags; approve_release must pass (includes tag↔branch validation).
     if: github.ref_type == 'tag' && github.triggering_actor == github.repository_owner
     needs: [approve_release]
     runs-on: ubuntu-latest
@@ -171,7 +258,7 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Export tag env (redundant safety)
+      - name: Export tag env (safety)
         shell: bash
         run: |
           echo "RAW_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
@@ -197,7 +284,6 @@ jobs:
             dist/cosmolet-*
 
   docker_multiarch:
-    # Same channel/owner gate as approve_release (dev never reaches here).
     if: >
       github.ref_type == 'tag' &&
       (startsWith(github.ref_name, 'release/alpha-v') ||
