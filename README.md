@@ -20,6 +20,38 @@ Reference Network Architecture
 - **Comprehensive Monitoring**: Prometheus metrics and health checks
 - **Security Hardened**: Minimal privileges with proper RBAC configuration
 
+## 📚 Documentation
+
+Start here → [`docs/index.md`](docs/index.md)
+
+- **Concepts & Design**: [`docs/overview.md`](docs/overview.md), [`docs/architecture.md`](docs/architecture.md)
+- **Deployment Guide**: [`docs/deployment.md`](docs/deployment.md)
+- **Fabric / FRR Config**: [`docs/frr-config.md`](docs/frr-config.md)
+- **Helm**: [`docs/helm/quickstart.md`](docs/helm/quickstart.md), [`docs/helm/values.md`](docs/helm/values.md)
+- **Operations**: [`docs/operations.md`](docs/operations.md), [`docs/metrics.md`](docs/metrics.md), [`docs/alerts.md`](docs/alerts.md), [`docs/security.md`](docs/security.md), [`docs/troubleshooting.md`](docs/troubleshooting.md)
+- **Migration & Compatibility**: [`docs/migration.md`](docs/migration.md), [`docs/compatibility.md`](docs/compatibility.md)
+- **📦 Examples catalog**: [`docs/examples/README.md`](docs/examples/README.md)
+- **🛠️ Config Generator (Q&A)**: [`docs/tools.md`](docs/tools.md) · script: `tools/gen-values.sh`
+
+## ⚙️ Quick Start (Q&A generator)
+
+Generate Helm values and FRR configs interactively:
+```bash
+chmod +x tools/gen-values.sh
+./tools/gen-values.sh
+helm upgrade --install cosmolet ./charts/cosmolet -n kube-system -f generated/helm-values.yaml
+# (optional) apply a sample Service from docs/examples/k8s/
+```
+
+Non‑interactive (CI-friendly) mode:
+```bash
+TOPOLOGY=dual-tor NODE_ASN=65101 NEIGHBOR_IPS=10.0.0.1,10.0.0.2 NEIGHBOR_ASNS=65000 \
+DUAL_STACK=true ENSURE_STATIC=true IMAGE_REPO=ghcr.io/platformbuilds/cosmolet IMAGE_TAG=latest \
+LOOP_INTERVAL=20 NAMESPACE=kube-system OUT_DIR=generated SERVICE_STYLE=local \
+SERVICE_NAMESPACE=demo SERVICE_NAME=web \
+./tools/gen-values.sh --yes
+```
+
 ## 📋 Prerequisites
 
 - Kubernetes 1.20+ cluster
@@ -30,171 +62,142 @@ Reference Network Architecture
 ## Code Flowchart
 ![High Level Algorithm/Flowchart](./flowchart/flowchart-1.png)
 
-# Build & Release Instructuction
-## Clone the repository
-```
-git clone https://github.com/platformbuilds/cosmolet.git
-cd cosmolet
-```
+---
 
-## Download dependencies
-```
-go mod download
-```
+# 🧱 Build & Release Instructions
 
-## Build the binary
+> All common tasks are codified in the **Makefile**.
 
-### Simple build (dev only)
-```
-go build -o ./bin/cosmolet ./cmd/cosmolet
-```
-
-### Production Build (Optimized)
-```
-#Build with optimizations (same as used in Dockerfile)
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags='-w -s -extldflags "-static"' \
-    -a -installsuffix cgo \
-    -o ./bin/cosmolet \
-    ./cmd/cosmolet
-```
-
-### Cross-Platform Compilation
-
-```
-# Linux (default)
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-  -ldflags='-w -s -extldflags "-static"' \
-  -a -installsuffix cgo \
-  -o ./bin/cosmolet-linux-amd64 \
-  ./cmd/cosmolet
-
-# macOS
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-  -ldflags='-w -s -extldflags "-static"' \
-  -a -installsuffix cgo \
-  -o ./bin/cosmolet-linux-darwin-amd64 \
-  ./cmd/cosmolet
-
-# Windows
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-  -ldflags='-w -s -extldflags "-static"' \
-  -a -installsuffix cgo \
-  -o ./bin/cosmolet-windows-amd64 \
-  ./cmd/cosmolet
-
-# ARM64 (for ARM-based systems)
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-  -ldflags='-w -s -extldflags "-static"' \
-  -a -installsuffix cgo \
-  -o ./bin/cosmolet-linux-arm64 \
-  ./cmd/cosmolet
-```
-
-### Using the Makefile
-The project includes a comprehensive Makefile with various build targets:
-```
-# Download dependencies
+### Install dependencies
+```bash
 make deps
-
-# Build binary
-make build
-
-# Build with all checks (fmt, vet, test)
-make check
-
-# Clean build
-make clean && make build
 ```
 
-
-### Multi-Architecture Build Script
-```
-#!/bin/bash
-# build-all.sh
-
-platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "windows/amd64")
-
-for platform in "${platforms[@]}"
-do
-    platform_split=(${platform//\// })
-    GOOS=${platform_split[0]}
-    GOARCH=${platform_split[1]}
-    output_name='./bin/cosmolet-'$GOOS'-'$GOARCH
-    if [ $GOOS = "windows" ]; then
-        output_name+='.exe'
-    fi
-
-    env GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build \
-        -ldflags='-w -s' \
-        -o bin/$output_name ./cmd/cosmolet
-
-    if [ $? -ne 0 ]; then
-        echo 'An error has occurred! Aborting the script execution...'
-        exit 1
-    fi
-done
+### Lint & security
+```bash
+make lint       # golangci-lint + fmt + vet
+make security   # govulncheck + gosec
 ```
 
-### Development Build
+### Run tests (with race + coverage)
+```bash
+make test
+# Optional:
+make coverage       # prints summary
+make coverage-html  # writes ./dist/coverage.html
 ```
-# Build with debug info
+
+### Build the binary
+```bash
+make build          # outputs ./bin/cosmolet
+```
+
+### Cross-compile release binaries
+```bash
+# One target
+GOOS=linux GOARCH=arm64 make build-release   # -> ./dist/cosmolet-linux-arm64
+
+# All common targets
+make build-multi    # -> ./dist/cosmolet-<os>-<arch>
+```
+
+### Docker images
+```bash
+# Single-arch image (local)
+make docker-build
+# Push it
+make docker-push
+
+# Multi-arch image (Buildx + push)
+IMAGE_TAGS="v1.2.3,latest" make docker-buildx
+# Optionally customize platforms:
+PLATFORMS="linux/amd64,linux/arm64" IMAGE_TAGS="$(git describe --tags --always)" make docker-buildx
+```
+
+### Helm helpers (optional)
+```bash
+make helm-lint
+make helm-package  # -> ./dist/
+```
+
+### CI fast path (everything)
+```bash
+make ci   # deps + lint + security + test + build
+```
+
+---
+
+## 🧪 Manual Build (advanced)
+
+If you prefer building without the Makefile:
+
+```bash
+# Simple build (dev only)
+go build -o ./bin/cosmolet ./cmd/cosmolet
+
+# Production (static)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build   -ldflags='-w -s -extldflags "-static"'   -a -installsuffix cgo   -o ./bin/cosmolet   ./cmd/cosmolet
+```
+
+Cross‑platform compilation examples:
+```bash
+# Linux default
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-w -s -extldflags "-static"' -a -installsuffix cgo -o ./bin/cosmolet-linux-amd64 ./cmd/cosmolet
+# macOS
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags='-w -s -extldflags "-static"' -a -installsuffix cgo -o ./bin/cosmolet-linux-darwin-amd64 ./cmd/cosmolet
+# Windows
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags='-w -s -extldflags "-static"' -a -installsuffix cgo -o ./bin/cosmolet-windows-amd64 ./cmd/cosmolet
+# ARM64
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags='-w -s -extldflags "-static"' -a -installsuffix cgo -o ./bin/cosmolet-linux-arm64 ./cmd/cosmolet
+```
+
+Dev build with debug info:
+```bash
 go build -gcflags="all=-N -l" -o ./bin/cosmolet-debug ./cmd/cosmolet
 ```
 
+### Build flags explained
+- `-ldflags='-w -s'` — drop debug symbols (smaller binary)
+- `-extldflags "-static"` — static linking
+- `CGO_ENABLED=0` — pure Go build
+- `-a -installsuffix cgo` — rebuild all, isolate CGO artifacts
 
-### Build Flags Explanation
-
-* `-ldflags='-w -s'`: Remove debug info and symbol table (reduces binary size)
-* `-extldflags "-static"`: Create statically linked binary
-* `CGO_ENABLED=0`: Disable CGO for pure Go binary
-* `-a`: Force rebuilding of packages
-* `-installsuffix cgo`: Use different install suffix for CGO
-
-### Environment Variables for Build
-```
-# Set common build environment
+### Environment variables
+```bash
 export CGO_ENABLED=0
 export GOOS=linux
 export GOARCH=amd64
-
-# Build with environment
 go build -ldflags='-w -s' -o cosmolet ./cmd/main.go
 ```
 
-## Verification
-After building, verify the binary:
-```
-# Check binary info
+## ✅ Verification
+```bash
 file cosmolet
-ldd cosmolet  # Should show "not a dynamic executable" for static build
-
-# Test binary
+ldd cosmolet          # "not a dynamic executable" for static build
 ./cosmolet --help
 ./cosmolet --version
 ```
 
-## Common Build Issues
-* Dependency Issues:
-```
+## 🧯 Common Build Issues
+**Dependencies**
+```bash
 go mod tidy
 go mod verify
 ```
 
-* CGO Dependencies:
-```
-# If you encounter CGO issues, try:
+**CGO**
+```bash
 CGO_ENABLED=0 go build ./cmd/main.go
 ```
 
-* Module Path Issues:
-```
-# Ensure you're in the correct directory
+**Module path**
+```bash
 go mod init github.com/platformcosmo/cosmolet  # if starting fresh
 ```
 
 The resulting binary will be statically linked and suitable for deployment in containers or bare-metal systems without external dependencies.
 
+---
 
 ## 🤝 Contributing
 
@@ -202,7 +205,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 
 ## 📄 License
 
-This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU Affero General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
 
 ---
 
