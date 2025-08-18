@@ -1,48 +1,29 @@
-# Default values for cosmolet
-replicaCount: 1
 
 image:
-  repository: platformbuilds/cosmolet
+  repository: ghcr.io/platformbuilds/cosmolet
+  tag: latest
   pullPolicy: IfNotPresent
-  tag: "latest"
 
 config:
-  services:
-    namespaces:
-      - "default"
-      - "kube-system"
   loopIntervalSeconds: 30
   bgp:
-    enabled: true
-  logging:
-    level: "info"
-    format: "text"
-
-resources:
-  limits:
-    cpu: 200m
-    memory: 256Mi
-  requests:
-    cpu: 100m
-    memory: 128Mi
-
-nodeSelector: {}
-tolerations:
-  - operator: Exists
-affinity: {}
-
-serviceAccount:
-  create: true
-  annotations: {}
-  name: ""
-
-rbac:
-  create: true
+    asn: 65001
+  frr:
+    socketPath: /var/run/frr
+    configPath: /etc/frr
+    ensureStatic: true
 
 securityContext:
   privileged: true
-  runAsUser: 0
 
 daemonset:
   hostNetwork: true
   hostPID: true
+  nodeSelector: {}
+  tolerations: []
+
+rbac:
+  create: true
+serviceAccount:
+  create: true
+  name: ""

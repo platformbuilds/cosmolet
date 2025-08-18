@@ -1,145 +1,122 @@
-// cmd/cosmolet/main.go
+
 package main
 
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
-	"cosmolet/pkg/config"
-	"cosmolet/pkg/controller"
-	"cosmolet/pkg/health"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+
+	cosmoctrl "github.com/platformbuilds/cosmolet/pkg/controller"
 )
 
-const (
-	defaultConfigPath = "/etc/cosmolet/config.yaml"
-	defaultLogLevel   = "info"
-)
-
-var (
-	configPath = flag.String("config", defaultConfigPath, "Path to configuration file")
-	logLevel   = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
-	version    = flag.Bool("version", false, "Print version information")
-
-	// Build information (set via ldflags)
-	Version   = "dev"
-	GitCommit = "unknown"
-	BuildDate = "unknown"
-)
+func getenvInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil { return n }
+	}
+	return def
+}
+func getenvBool(name string, def bool) bool {
+	if v := os.Getenv(name); v != "" {
+		if v == "1" || v == "true" || v == "TRUE" { return true }
+		if v == "0" || v == "false" || v == "FALSE" { return false }
+	}
+	return def
+}
+func getenv(name, def string) string {
+	if v := os.Getenv(name); v != "" { return v }
+	return def
+}
 
 func main() {
+	var kubeconfig string
+	var resyncSeconds int
+	var loopIntervalSeconds int
+
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig (in-cluster if empty)")
+	flag.IntVar(&resyncSeconds, "resync-seconds", 300, "Shared informer resync period seconds")
+	flag.IntVar(&loopIntervalSeconds, "loop-interval-seconds", 30, "Reconcile loop interval seconds")
 	flag.Parse()
 
-	if *version {
-		printVersion()
-		return
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		log.Fatalf("NODE_NAME env var must be set via Downward API")
 	}
 
-	log.Printf("Starting Cosmolet BGP Service Controller")
-	log.Printf("Version: %s, Commit: %s, Build Date: %s", Version, GitCommit, BuildDate)
-
-	// Load configuration
-	cfg, err := config.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+	// Build k8s client
+	var cfg *rest.Config
+	var err error
+	if kubeconfig != "" {
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+	} else {
+		cfg, err = rest.InClusterConfig()
 	}
+	if err != nil { log.Fatalf("failed building kube config: %v", err) }
 
-	log.Printf("Configuration loaded from: %s", *configPath)
-	log.Printf("Monitoring namespaces: %v", cfg.Services.Namespaces)
-	log.Printf("Loop interval: %d seconds", cfg.LoopIntervalSeconds)
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil { log.Fatalf("failed creating kube client: %v", err) }
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Shared informer factory
+	factory := informers.NewSharedInformerFactory(client, time.Duration(resyncSeconds)*time.Second)
 
-	// Start health check server
-	healthChecker := health.NewChecker()
-	go startHealthServer(healthChecker)
+	// Informers we need
+	svcInf := factory.Core().V1().Services()
+	nodeInf := factory.Core().V1().Nodes()
+	epsInf := factory.Discovery().V1().EndpointSlices()
 
-	// Create and start BGP controller
-	bgpController, err := controller.NewBGPServiceController(cfg, ctx)
-	if err != nil {
-		log.Fatalf("Failed to create BGP service controller: %v", err)
-	}
+	stop := make(chan struct{})
+	defer close(stop)
+	factory.Start(stop)
+	factory.WaitForCacheSync(stop)
 
-	// Start controller in goroutine
+	// Metrics HTTP server
 	go func() {
-		if err := bgpController.Start(); err != nil {
-			log.Printf("BGP controller error: %v", err)
-			cancel()
-		}
+		http.Handle("/metrics", promhttp.Handler())
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request){ w.WriteHeader(200); w.Write([]byte("ok")) })
+		http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request){ w.WriteHeader(200); w.Write([]byte("ready")) })
+		log.Printf("Metrics listening on :8080")
+		_ = http.ListenAndServe(":8080", nil)
 	}()
 
-	// Mark as ready
-	healthChecker.SetReady(true)
+	asn := getenvInt("BGP_ASN", 65001)
+	ensureStatic := getenvBool("FRR_ENSURE_STATIC", true)
+	vtyshPath := getenv("VTYSH_PATH", "/usr/bin/vtysh")
 
-	// Wait for shutdown signal
-	waitForShutdown(cancel)
+	// Controller
+	ctrl, err := cosmoctrl.NewBGPController(cosmoctrl.Config{
+		NodeName:              nodeName,
+		LoopInterval:          time.Duration(loopIntervalSeconds) * time.Second,
+		ServiceInformer:       svcInf,
+		EndpointSliceInformer: epsInf,
+		NodeInformer:          nodeInf,
+		KubeClient:            client,
+		ASN:                   asn,
+		EnsureStatic:          ensureStatic,
+		VTYSHPath:             vtyshPath,
+	})
+	if err != nil { log.Fatalf("failed creating controller: %v", err) }
 
-	log.Println("Shutting down Cosmolet BGP Service Controller")
-}
+	// Start reconcile loop
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ctrl.Run(ctx)
 
-func printVersion() {
-	fmt.Printf("Cosmolet BGP Service Controller\n")
-	fmt.Printf("Version: %s\n", Version)
-	fmt.Printf("Git Commit: %s\n", GitCommit)
-	fmt.Printf("Build Date: %s\n", BuildDate)
-}
-
-func startHealthServer(checker *health.Checker) {
-	mux := http.NewServeMux()
-
-	// Health endpoints
-	mux.HandleFunc("/healthz", checker.LivenessHandler)
-	mux.HandleFunc("/readyz", checker.ReadinessHandler)
-	mux.HandleFunc("/version", versionHandler)
-
-	// Metrics endpoint (basic for now)
-	mux.HandleFunc("/metrics", metricsHandler)
-
-	server := &http.Server{
-		Addr:    ":8080",
-		Handler: mux,
-	}
-
-	log.Println("Starting health check server on :8080")
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("Health server error: %v", err)
-	}
-}
-
-func versionHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{
-		"version": "%s",
-		"gitCommit": "%s",
-		"buildDate": "%s"
-	}`, Version, GitCommit, BuildDate)
-}
-
-func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	// Basic metrics endpoint - in a real implementation,
-	// you would use Prometheus client library
-	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprintf(w, "# HELP cosmolet_info Information about cosmolet\n")
-	fmt.Fprintf(w, "# TYPE cosmolet_info gauge\n")
-	fmt.Fprintf(w, "cosmolet_info{version=\"%s\",commit=\"%s\"} 1\n", Version, GitCommit)
-}
-
-func waitForShutdown(cancel context.CancelFunc) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigChan
-	log.Printf("Received signal: %s", sig)
-
-	// Give some time for graceful shutdown
-	cancel()
-	time.Sleep(5 * time.Second)
+	// Handle termination signals: perform best-effort withdraw
+	sigc := make(chan os.Signal, 2)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	<-sigc
+	log.Printf("Shutdown signal received, withdrawing VIPs announced by this node...")
+	ctrl.WithdrawAll(context.Background())
+	log.Printf("Shutdown complete.")
 }

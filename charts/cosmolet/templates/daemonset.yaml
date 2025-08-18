@@ -1,8 +1,10 @@
+
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "cosmolet.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  name: cosmolet
+  labels:
+    app.kubernetes.io/name: cosmolet
 spec:
   selector:
     matchLabels:
@@ -12,30 +14,42 @@ spec:
       labels:
         app.kubernetes.io/name: cosmolet
     spec:
-      serviceAccountName: {{ include "cosmolet.serviceAccountName" . }}
       hostNetwork: {{ .Values.daemonset.hostNetwork }}
       hostPID: {{ .Values.daemonset.hostPID }}
+      serviceAccountName: {{ include "cosmolet.serviceAccountName" . }}
       containers:
-      - name: cosmolet
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 10 }}
-        resources:
-          {{- toYaml .Values.resources | nindent 10 }}
-        volumeMounts:
-        - name: config
-          mountPath: /etc/cosmolet
-        - name: frr-sockets
-          mountPath: /var/run/frr
+        - name: cosmolet
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: {{ .Values.securityContext.privileged }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: LOOP_INTERVAL_SECONDS
+              value: "{{ .Values.config.loopIntervalSeconds }}"
+            - name: BGP_ASN
+              value: "{{ .Values.config.bgp.asn }}"
+            - name: FRR_ENSURE_STATIC
+              value: "{{ .Values.config.frr.ensureStatic }}"
+            - name: VTYSH_PATH
+              value: "/usr/bin/vtysh"
+          ports:
+            - name: http-metrics
+              containerPort: 8080
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh","-c","curl -s localhost:8080/readyz >/dev/null 2>&1 || true"]
+          volumeMounts:
+            - name: frr-run
+              mountPath: /var/run/frr
+            - name: frr-etc
+              mountPath: /etc/frr
       volumes:
-      - name: config
-        configMap:
-          name: {{ include "cosmolet.fullname" . }}-config
-      - name: frr-sockets
-        hostPath:
-          path: /var/run/frr
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        - name: frr-run
+          hostPath: { path: /var/run/frr }
+        - name: frr-etc
+          hostPath: { path: /etc/frr }

@@ -1,0 +1,15 @@
+
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cosmolet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cosmolet
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cosmolet.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
