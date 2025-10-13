@@ -28,6 +28,11 @@ spec:
           mountPath: /etc/cosmolet
         - name: frr-sockets
           mountPath: /var/run/frr
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
       volumes:
       - name: config
         configMap:

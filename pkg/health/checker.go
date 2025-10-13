@@ -1,4 +1,3 @@
-// pkg/health/checker.go
 package health
 
 import (
@@ -9,7 +8,6 @@ import (
 	"time"
 )
 
-// Checker manages the health state of the application
 type Checker struct {
 	mu       sync.RWMutex
 	ready    bool
@@ -19,7 +17,6 @@ type Checker struct {
 	checks   map[string]HealthCheck
 }
 
-// HealthCheck represents a single health check
 type HealthCheck struct {
 	Name     string    `json:"name"`
 	Status   string    `json:"status"`
@@ -28,7 +25,6 @@ type HealthCheck struct {
 	Duration string    `json:"duration,omitempty"`
 }
 
-// HealthResponse represents the health check response
 type HealthResponse struct {
 	Status    string                 `json:"status"`
 	Timestamp time.Time              `json:"timestamp"`
@@ -36,7 +32,6 @@ type HealthResponse struct {
 	Checks    map[string]HealthCheck `json:"checks,omitempty"`
 }
 
-// NewChecker creates a new health checker
 func NewChecker() *Checker {
 	return &Checker{
 		ready:   false,
@@ -46,32 +41,27 @@ func NewChecker() *Checker {
 	}
 }
 
-// SetReady sets the readiness state
 func (h *Checker) SetReady(ready bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.ready = ready
 }
 
-// SetLive sets the liveness state
 func (h *Checker) SetLive(live bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.live = live
 }
 
-// UpdateLastLoop updates the last loop execution time
 func (h *Checker) UpdateLastLoop() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lastLoop = time.Now()
 }
 
-// AddCheck adds or updates a health check
 func (h *Checker) AddCheck(name, status, message string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
 	h.checks[name] = HealthCheck{
 		Name:    name,
 		Status:  status,
@@ -80,11 +70,9 @@ func (h *Checker) AddCheck(name, status, message string) {
 	}
 }
 
-// AddCheckWithDuration adds or updates a health check with duration
 func (h *Checker) AddCheckWithDuration(name, status, message string, duration time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
 	h.checks[name] = HealthCheck{
 		Name:     name,
 		Status:   status,
@@ -94,131 +82,70 @@ func (h *Checker) AddCheckWithDuration(name, status, message string, duration ti
 	}
 }
 
-// RemoveCheck removes a health check
-func (h *Checker) RemoveCheck(name string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.checks, name)
-}
-
-// IsReady returns the readiness state
-func (h *Checker) IsReady() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.ready
-}
-
-// IsLive returns the liveness state
-func (h *Checker) IsLive() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.live
-}
-
-// GetUptime returns the uptime duration
-func (h *Checker) GetUptime() time.Duration {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return time.Since(h.started)
-}
-
-// GetLastLoop returns the time of the last loop execution
-func (h *Checker) GetLastLoop() time.Time {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.lastLoop
-}
-
-// LivenessHandler handles liveness probe requests
 func (h *Checker) LivenessHandler(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-
 	status := "ok"
-	httpStatus := http.StatusOK
-
-	if !h.live {
+	code := http.StatusOK
+	if !h.live || (!h.lastLoop.IsZero() && time.Since(h.lastLoop) > 5*time.Minute) {
 		status = "unhealthy"
-		httpStatus = http.StatusServiceUnavailable
+		code = http.StatusServiceUnavailable
 	}
-
-	// Check if the last loop was too long ago (indicates stuck controller)
-	if !h.lastLoop.IsZero() && time.Since(h.lastLoop) > 5*time.Minute {
-		status = "stale"
-		httpStatus = http.StatusServiceUnavailable
-	}
-
-	response := HealthResponse{
+	resp := HealthResponse{
 		Status:    status,
 		Timestamp: time.Now(),
 		Uptime:    time.Since(h.started).String(),
 	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(resp)
 }
 
-// ReadinessHandler handles readiness probe requests
 func (h *Checker) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-
 	status := "ready"
-	httpStatus := http.StatusOK
-
+	code := http.StatusOK
 	if !h.ready {
 		status = "not_ready"
-		httpStatus = http.StatusServiceUnavailable
+		code = http.StatusServiceUnavailable
 	}
-
-	// Copy checks for response
-	checks := make(map[string]HealthCheck)
-	for k, v := range h.checks {
-		checks[k] = v
-	}
-
-	// Check for any failed health checks
-	for _, check := range checks {
+	for _, check := range h.checks {
 		if check.Status != "ok" && check.Status != "pass" {
 			status = "unhealthy"
-			httpStatus = http.StatusServiceUnavailable
+			code = http.StatusServiceUnavailable
 			break
 		}
 	}
-
-	response := HealthResponse{
+	resp := HealthResponse{
 		Status:    status,
 		Timestamp: time.Now(),
 		Uptime:    time.Since(h.started).String(),
-		Checks:    checks,
+		Checks:    h.checks,
 	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(resp)
 }
 
-// CheckKubernetesAPI checks if Kubernetes API is accessible
-func (h *Checker) CheckKubernetesAPI(accessible bool, message string) {
+func (h *Checker) CheckKubernetesAPI(accessible bool, msg string) {
 	status := "pass"
 	if !accessible {
 		status = "fail"
 	}
-	h.AddCheck("kubernetes_api", status, message)
+	h.AddCheck("kubernetes_api", status, msg)
 }
 
-// CheckFRRStatus checks if FRR is accessible
-func (h *Checker) CheckFRRStatus(accessible bool, message string) {
+func (h *Checker) CheckFRRStatus(accessible bool, msg string) {
 	status := "pass"
 	if !accessible {
 		status = "fail"
 	}
-	h.AddCheck("frr_status", status, message)
+	h.AddCheck("frr_status", status, msg)
 }
 
-// CheckServiceDiscovery updates service discovery health
-func (h *Checker) CheckServiceDiscovery(serviceCount int, duration time.Duration) {
-	message := fmt.Sprintf("Discovered %d services", serviceCount)
-	h.AddCheckWithDuration("service_discovery", "pass", message, duration)
+func (h *Checker) CheckServiceDiscovery(count int, duration time.Duration) {
+	msg := fmt.Sprintf("Discovered %d services", count)
+	h.AddCheckWithDuration("service_discovery", "pass", msg, duration)
 }
+

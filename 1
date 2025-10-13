@@ -1,0 +1,62 @@
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"cosmolet/pkg/config"
+	"cosmolet/pkg/controller"
+	"cosmolet/pkg/health"
+)
+
+func main() {
+	log.Println("Starting Cosmolet BGP Service Controller")
+
+	// Initialize configuration
+	cfg := &config.Config{
+		Namespaces:          []string{"ingress-controller"},
+		LoopIntervalSeconds: 30,       // updated field name
+		BGPMode:             "connected",
+		NodeName:            os.Getenv("NODE_NAME"),
+		NodeIP:              os.Getenv("NODE_IP"),
+		HealthCheckPort:     1042,     // make sure this field exists in config.Config
+		HealthCheckTimeout:  2,        // make sure this field exists in config.Config
+	}
+
+	log.Printf("Version: %s, Commit: %s, Build Date: %s", "dev", "unknown", "unknown")
+	log.Printf("Monitoring namespaces: %v", cfg.Namespaces)
+	log.Printf("Loop interval: %d seconds", cfg.LoopIntervalSeconds)
+	log.Printf("BGP mode: %s", cfg.BGPMode)
+
+	// Context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle termination signals
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		log.Printf("Received signal: %v", sig)
+		cancel()
+	}()
+
+	// Start health check server
+	health.StartHealthServer(":8080")
+
+	// Initialize BGP controller
+	bgpController, err := controller.NewBGPServiceController(cfg, ctx)
+	if err != nil {
+		log.Fatalf("Failed to initialize BGP controller: %v", err)
+	}
+
+	log.Println("Running in connected mode: only adding healthy service IPs to loopback, skipping FRR")
+	if err := bgpController.Start(); err != nil {
+		log.Fatalf("Controller stopped with error: %v", err)
+	}
+}
+

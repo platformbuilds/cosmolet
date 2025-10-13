@@ -26,6 +26,12 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+env:
+  - name: NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
 nodeSelector: {}
 tolerations:
   - operator: Exists

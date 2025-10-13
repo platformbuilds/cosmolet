@@ -13,9 +13,21 @@ import (
 type Config struct {
 	Services            ServicesConfig `yaml:"services"`
 	LoopIntervalSeconds int            `yaml:"loop_interval_seconds"`
-	BGP                 BGPConfig      `yaml:"bgp,omitempty"`
-	Logging             LoggingConfig  `yaml:"logging,omitempty"`
-	FRR                 FRRConfig      `yaml:"frr,omitempty"`
+
+	// BGP
+	BGP     BGPConfig `yaml:"bgp,omitempty"`
+	BGPMode string    `yaml:"bgp_mode,omitempty"` // "connected" or "dynamic"
+
+	// Logging
+	Logging LoggingConfig `yaml:"logging,omitempty"`
+
+	// FRR
+	FRR FRRConfig `yaml:"frr,omitempty"`
+
+	// Runtime
+	NodeIP         string `yaml:"node_ip,omitempty"`         // host node IP (optional, autodetect if empty)
+	NodeName       string `yaml:"node_name,omitempty"`       // hostname or k8s node name
+	KubeConfigPath string `yaml:"kubeconfig,omitempty"`      // path for out-of-cluster mode
 }
 
 // ServicesConfig contains service discovery configuration
@@ -27,6 +39,7 @@ type ServicesConfig struct {
 type BGPConfig struct {
 	Enabled bool `yaml:"enabled"`
 	ASN     int  `yaml:"asn,omitempty"`
+	ExcludedIPs []string `yaml:"excluded_ips,omitempty"` 
 }
 
 // LoggingConfig contains logging configuration
@@ -51,7 +64,9 @@ func LoadConfig(configPath string) (*Config, error) {
 		LoopIntervalSeconds: 30,
 		BGP: BGPConfig{
 			Enabled: true,
+			ASN:     65000,
 		},
+		BGPMode: "connected",
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "text",
@@ -63,23 +78,20 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// Check if config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// File doesn't exist, use defaults with warning
 		fmt.Printf("Warning: Config file %s not found, using defaults\n", configPath)
 		return config, nil
 	}
 
-	// Read config file
 	data, err := ioutil.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %v", configPath, err)
 	}
 
-	// Parse YAML
 	if err := yaml.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %v", configPath, err)
 	}
 
-	// Validate configuration
+	// Validate
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %v", err)
 	}
@@ -89,70 +101,53 @@ func LoadConfig(configPath string) (*Config, error) {
 
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
-	// Validate services configuration
 	if len(c.Services.Namespaces) == 0 {
 		return fmt.Errorf("at least one namespace must be specified")
 	}
-
-	// Validate loop interval
 	if c.LoopIntervalSeconds <= 0 {
 		return fmt.Errorf("loop_interval_seconds must be positive")
 	}
-
-	// Validate logging level
-	validLogLevels := map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
-	}
-	if !validLogLevels[c.Logging.Level] {
-		return fmt.Errorf("invalid log level: %s (must be debug, info, warn, or error)", c.Logging.Level)
-	}
-
-	// Validate logging format
-	validLogFormats := map[string]bool{
-		"text": true,
-		"json": true,
-	}
-	if !validLogFormats[c.Logging.Format] {
-		return fmt.Errorf("invalid log format: %s (must be text or json)", c.Logging.Format)
-	}
-
-	// Validate FRR socket path
 	if c.FRR.SocketPath == "" {
 		return fmt.Errorf("frr.socket_path cannot be empty")
 	}
-
+	if c.BGPMode != "connected" && c.BGPMode != "dynamic" {
+		return fmt.Errorf("invalid bgp_mode: %s (must be connected or dynamic)", c.BGPMode)
+	}
 	return nil
+}
+
+// ---------------------- Helper Methods ----------------------
+
+// GetNodeName returns the configured NodeName, or hostname if empty
+func (c *Config) GetNodeName() string {
+	if c.NodeName != "" {
+		return c.NodeName
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
+}
+
+// GetBGPMode returns the configured BGP mode ("connected" or "dynamic")
+func (c *Config) GetBGPMode() string {
+	return c.BGPMode
+}
+
+// GetLoopInterval returns the loop interval in seconds
+func (c *Config) GetLoopInterval() int {
+	if c.LoopIntervalSeconds <= 0 {
+		return 30
+	}
+	return c.LoopIntervalSeconds
 }
 
 // GetNamespaces returns the list of namespaces to monitor
 func (c *Config) GetNamespaces() []string {
+	if len(c.Services.Namespaces) == 0 {
+		return []string{"default"}
+	}
 	return c.Services.Namespaces
 }
 
-// GetLoopInterval returns the loop interval duration
-func (c *Config) GetLoopInterval() int {
-	return c.LoopIntervalSeconds
-}
-
-// IsBGPEnabled returns whether BGP is enabled
-func (c *Config) IsBGPEnabled() bool {
-	return c.BGP.Enabled
-}
-
-// GetBGPASN returns the BGP ASN if configured
-func (c *Config) GetBGPASN() int {
-	return c.BGP.ASN
-}
-
-// GetFRRSocketPath returns the FRR socket path
-func (c *Config) GetFRRSocketPath() string {
-	return c.FRR.SocketPath
-}
-
-// GetFRRConfigPath returns the FRR config path
-func (c *Config) GetFRRConfigPath() string {
-	return c.FRR.ConfigPath
-}

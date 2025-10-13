@@ -1,13 +1,15 @@
-# Basic configuration for Cosmolet BGP Service Controller
 services:
   namespaces:
-    - "default"
-    - "kube-system"
+    - "ingress-controller"
 
-loop_interval_seconds: 30
+loop_interval_seconds: 3
+
+bgp_mode: "dynamic"  # options: "dynamic" or "connected"
 
 bgp:
   enabled: true
+  asn: 65496
+  excluded_ips:
 
 logging:
   level: "info"
@@ -15,3 +17,4 @@ logging:
 
 frr:
   socket_path: "/var/run/frr"
+
