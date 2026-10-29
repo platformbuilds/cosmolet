@@ -181,3 +181,108 @@ Cosmolet is documented as a Kubernetes controller that advertises Kubernetes ser
 - What is wrong: The DaemonSet container has no `livenessProbe` or `readinessProbe`, even though the binary exposes `/healthz` (liveness) and `/readyz` (readiness) on `:8080` (`main.go:99-100`) and the Dockerfile already defines a `HEALTHCHECK` against `http://localhost:8080/healthz`. Kubernetes does not read the Dockerfile `HEALTHCHECK`; it only honors in-pod probes.
 - How it fails in practice: A hung or wedged controller (e.g. stuck on an unresponsive FRR `vtysh` call — see Finding 6) is never restarted by the kubelet because there is no liveness probe. With `hostNetwork: true` the `:8080` listener is on the host network, but no probe is declared to check it, so the pod stays "ready" indefinitely while making no progress.
 - Fix: Left unfixed (needs a decision). Adding in-pod `livenessProbe`/`readinessProbe` on `:8080/healthz` and `:8080/readyz` is low-risk in principle, but the pod runs with `hostNetwork: true`, so probe health depends on host port availability and the (separate) decision about how FRR is reached. A human should confirm the intended probe/port model (in-pod `:8080` vs host) before wiring probes. Recommendation: add `httpGet` probes on `/healthz` (liveness) and `/readyz` (readiness) at `:8080` once the FRR-in-pod-vs-host question is settled.
+
+### Finding 20
+- Severity: P0
+- File: Dockerfile:1 (`FROM golang:1.21-alpine AS builder`) ; go.mod:3 (`go 1.27.3`)
+- What is wrong: The Docker build stage uses Go 1.21, but `go.mod` declares `go 1.27.3`. Go's toolchain directive is a hard minimum: a 1.21 toolchain refuses to build a module that requires a newer language version.
+- How it fails in practice: `make docker-build` / `docker build` fails immediately in the builder stage with `go.mod requires go >= 1.27.3 (running go 1.21)` (or a toolchain-resolution error). No image can be produced at all — the single most fundamental build break in the repo, and it masks every other build issue behind it.
+- Fix: Fixed (this branch). Bumped the builder to `FROM golang:1.27-alpine` (falls back to `golang:1.27` if the `-alpine` tag is unavailable) so it satisfies `go 1.27.3`.
+
+### Finding 21
+- Severity: P1
+- File: cmd/cosmolet/main.go:27 (flag `-log-level`) ; main.go:44-55,111,140 (all logging via stdlib `log`) ; pkg/config/config.go:34,109 (cfg.Logging.Level)
+- What is wrong: The documented `-log-level` flag and the config field `logging.level` are both parsed and validated, but neither is ever applied. `main.go` only uses the stdlib `log` package with no level filtering, so the flag and config value are dead: every log call emits regardless of level. (The `-log-level` flag at main.go:27 is defined and never referenced after `flag.Parse()`.)
+- How it fails in practice: An operator sets `--log-level=error` (or `logging.level: error`) to quiet a noisy daemon (e.g. during the per-loop `vtysh`/`ip` chatter) and sees no change — the flag silently does nothing. The documented knob gives a false guarantee, and debug/info/warn/error all behave identically.
+- Fix: Fixed (this branch). Added a small stdlib `log` filter (`pkg/logging`-style wrapper) that the `logging.level` / `--log-level` values actually gate, applied before logging begins. Covered by a unit test.
+
+### Finding 22
+- Severity: P2
+- File: pkg/config/config.go:93-94 (Validate) ; pkg/controller/bgp_controller.go:157-160 (fetchServicesFromNamespaces)
+- What is wrong: `Validate()` only rejects a *zero-length* namespace list. A list containing the empty string, `namespaces: [""]`, passes validation, and the controller then calls `client.CoreV1().Services("").List(...)` — in the Kubernetes API, the empty namespace is the wildcard for **all namespaces**.
+- How it fails in practice: A typo or template bug that renders `namespaces: [""]` silently escalates the controller from a scoped allow-list to cluster-wide service discovery (and cluster-wide BGP advertisement of every ClusterIP in every namespace). The "namespace allow-list" safety boundary is defeated with no error at startup.
+- Fix: Fixed (this branch). `Validate()` now rejects any empty-string entry in `services.namespaces`. Covered by a config test.
+
+### Finding 23
+- Severity: P2
+- File: pkg/config/config.go:98-100 (Validate) ; pkg/controller/bgp_controller.go:437-440 (sleep)
+- What is wrong: `Validate()` only requires `loop_interval_seconds > 0`; there is no upper bound. The control loop's only pacing is `sleep()`, which does a plain context-gated `time.Sleep` for the configured duration.
+- How it fails in practice: A value like `loop_interval_seconds: 999999999` boots fine, then the controller sleeps ~31 years between loops. The liveness staleness check (5 min) marks the pod not-ready/failed immediately and forever, the operator sees a wedged DaemonSet, and the only remedy is to redeploy. A misconfigured huge interval is indistinguishable from a hung controller.
+- Fix: Fixed (this branch). `Validate()` now caps `loop_interval_seconds` at 3600 (1 hour). Covered by a config test.
+
+### Finding 24
+- Severity: P2
+- File: pkg/config/config.go:64-69 (LoadConfig)
+- What is wrong: When the config file does not exist, `LoadConfig` prints a `fmt.Printf` warning and returns fail-open **defaults** (BGP enabled, ASN 0, namespaces `["default"]`) instead of erroring.
+- How it fails in practice: If the Helm ConfigMap mount is missing or the path is wrong (e.g. the pre-Finding-13 breakage, or a hand-rolled deploy), the daemon starts "successfully" with default config: BGP enabled but ASN 0 (which, pre-Finding-8, would emit `router bgp 0` and announce nothing). For a privileged, hostNetwork, hostPID BGP daemon that is supposed to shape production routing, silently running on defaults is a fail-open foot-gun; the correct behavior is to fail closed at startup.
+- Fix: Fixed (this branch). `LoadConfig` now returns an error when the config file is missing (fail-closed), so a misdeployed/misconfigured daemon refuses to start rather than routing on defaults. Covered by a config test.
+
+### Finding 25
+- Severity: P3
+- File: pkg/config/config.go:6 (import `io/ioutil`), :72 (`ioutil.ReadFile`)
+- What is wrong: `ioutil.ReadFile` is deprecated since Go 1.16; `os.ReadFile` is the replacement.
+- How it fails in practice: No runtime failure; a `staticcheck`/`depguard` lint would flag it and it is a code-smell in a new codebase.
+- Fix: Fixed (this branch). Replaced with `os.ReadFile`.
+
+### Finding 26
+- Severity: P2
+- File: .gitignore:42-43 (`go.mod`, `go.sum`)
+- What is wrong: `.gitignore` lists `go.mod` and `go.sum`, but both are now committed (force-added in Task 0 so the repo builds and the Dockerfile's `COPY go.mod go.sum` works).
+- How it fails in practice: Any contributor running `git status` / `git add .` gets confusing "ignored" behavior around the module files; `git check-ignore` says they're ignored even though they're tracked. It invites accidental divergence and makes the ignore list self-contradictory.
+- Fix: Fixed (this branch). Removed `go.mod` and `go.sum` from `.gitignore` so the tracked module files are not simultaneously ignored.
+
+### Finding 27
+- Severity: P2
+- File: bin/cosmolet-darwin-arm64 (tracked, mode 100755, ~49 MB)
+- What is wrong: A stale 51 MB `darwin-arm64` binary is committed to the repo. It is the wrong architecture for a Linux BGP controller, it is a build artifact (the binary is rebuilt by `make build`), and it is not reproducible from source.
+- How it fails in practice: Every clone of the repo downloads ~49 MB of dead binary; `git status`/history carry a non-reproducible artifact; and it is the darwin-arm64 build while the container builds linux — it cannot be the thing that ever runs in production. It also inflates `.dockerignore`-less `COPY . .` (see Finding 31).
+- Fix: Fixed (this branch). Removed `bin/cosmolet-darwin-arm64` from git (`git rm`). The `bin/` ignore rules already prevent re-adding build output.
+
+### Finding 28
+- Severity: P1
+- File: .github/workflows (absent — verified no CI config present)
+- What is wrong: There is no CI workflow. No automated `go build`, `go vet`, or `go test` gate on push/PR.
+- How it fails in practice: Broken builds, vet failures, and regressing tests are only caught when someone runs them locally. Given the Dockerfile's Go-version mismatch (Finding 20) and the untracked-module history (Finding 26), nothing in the pipeline would have flagged the "image cannot build" P0 before it reached a human.
+- Fix: Fixed (this branch). Added a minimal `.github/workflows/ci.yml` running `go build ./...`, `go vet ./...`, and `go test -race -count=1 ./...` on push and pull_request.
+
+### Finding 29
+- Severity: P3
+- File: Dockerfile:13 (`COPY . .`) ; no .dockerignore present
+- What is wrong: The builder runs `COPY . .` with no `.dockerignore`, so the entire build context — including the 51 MB tracked `bin/` binary (Finding 27), `.git/`, and any local dev artifacts — is copied into the builder stage.
+- How it fails in practice: Every docker build uploads a much larger build context than necessary, slows the build, and risks baking stale build artifacts into the image. It is the direct enabler of the bloat flagged in Finding 27.
+- Fix: Fixed (this branch). Added a `.dockerignore` excluding `bin/`, `.git/`, and other non-build inputs. (Low-risk; the binary removal in Finding 27 is the primary win, the `.dockerignore` prevents regressions.)
+
+### Finding 30
+- Severity: P2
+- File: Dockerfile:21 (`RUN go mod tidy`) ; Dockerfile:10 (`RUN go mod download`)
+- What is wrong: `go mod tidy` runs at *build time* inside the image build, after `go mod download` already fetched the pinned modules. `go mod tidy` may rewrite `go.mod`/`go.sum` if the module graph differs from what's committed.
+- How it fails in practice: Builds are non-reproducible: two builds of the same commit can resolve different module versions (or a tidy can mutate the committed `go.sum` inside the build stage), so the resulting binary is not a pure function of the source. It also makes the committed `go.sum` unenforced — the build does not actually verify against it.
+- Fix: Fixed (this branch). Replaced `RUN go mod tidy` with `RUN go mod verify` so the build verifies the committed `go.sum` instead of mutating it, making builds reproducible.
+
+### Finding 31
+- Severity: P3
+- File: Dockerfile:48 (`EXPOSE 8080 9090`) ; cmd/cosmolet/main.go:107 (listener on `:8080`), :126-133 (`/metrics` static stub)
+- What is wrong: The Dockerfile exposes port 9090, but nothing in the binary listens on 9090. The only listener is on `:8080` (health + a static `cosmolet_info` metrics stub). Port 9090 is advertised in `EXPOSE` (and in the Design section's port doc) but is a dead port.
+- How it fails in practice: An operator or scraper reading the image metadata expects a Prometheus endpoint on 9090 and points at it, finding nothing. The metrics endpoint that does exist (8080, a single static gauge) is not what the port doc implies.
+- Fix: Left unfixed (product decision). Removing `9090` from `EXPOSE` and the port documentation, or wiring a real Prometheus server to 9090, is a product/documentation decision (which port should serve metrics). Recommendation: drop `9090` from `EXPOSE` and the design doc until a real metrics server exists, or move the (future) Prometheus handler to 9090 and update the doc accordingly.
+
+### Finding 32
+- Severity: P2
+- File: Makefile:7 (`VERSION := $(shell git describe --tags --dirty --always)`) ; `git tag -l` returns empty (no tags)
+- What is wrong: The Makefile derives the image tag from `git describe --tags`, but the repo has **no git tags at all**. With no tags, `git describe --tags --always` falls back to the abbreviated commit hash (plus `-dirty` on a dirty tree), e.g. `21c393c-dirty`.
+- How it fails in practice: `make docker-build` tags the image `docker.io/cosmolet/cosmolet:21c393c-dirty` — an opaque, non-semantic, commit-hash tag that changes on every commit and is meaningless to an operator. It never produces a stable, meaningful version, and the chart's `appVersion`-based tag (Finding 15/18) will not match a `make docker-build` tag.
+- Fix: Left unfixed (needs a decision). This is a versioning-scheme decision: adopt semantic release tags (e.g. `git tag v0.1.0`) and let `git describe` produce `v0.1.0-dirty`-style tags, or pin the version some other way. A human should choose the canonical tagging workflow (see Finding 15 note) before this is "fixed". Recommendation: create a release tag (e.g. `v0.1.0`) and keep `git describe --tags --dirty --always`; the Makefile itself is then correct.
+
+### Finding 33
+- Severity: P3
+- File: scripts/build.sh:10 (`-X main.Version=${VERSION}`) ; cmd/cosmolet/main.go:31-33 (Version, GitCommit, BuildDate)
+- What is wrong: `build.sh` only sets `main.Version` via ldflags; it does not set `main.GitCommit` or `main.BuildDate` (unlike the Makefile, which sets all three).
+- How it fails in practice: A binary built via `scripts/build.sh` reports `Git Commit: unknown` and `Build Date: unknown` in `--version` and `/version`, losing traceability to the exact source commit. Inconsistent with the Makefile build.
+- Fix: Fixed (this branch). `build.sh` now also sets `main.GitCommit` and `main.BuildDate`, matching the Makefile.
+
+### Finding 34
+- Severity: P3
+- File: pkg/config/config.go:34-35 (Format), :113-120 (Validate format); cmd/cosmolet/main.go (no format applied)
+- What is wrong: `logging.format` is parsed and validated (text/json) but never applied anywhere; the logger always uses the stdlib default text format.
+- How it fails in practice: An operator sets `logging.format: json` expecting structured, machine-parseable logs (important for a DaemonSet feeding a log aggregator) and gets plain-text lines instead. The knob is dead, like the dead log level (Finding 21).
+- Fix: Left unfixed (needs a decision / larger change). A clean, minimal fix would mean either (a) adding a tiny JSON log formatter used when `format=json`, or (b) documenting that only `text` is supported and removing the `json` option. Because it interacts with Finding 21's log-level work and the stdlib `log` package has no built-in JSON formatter, it was left as a recommendation rather than a half-wired change. Recommendation: implement a minimal `log` hook that emits JSON lines when `format=json` (fields: ts, level, msg), alongside the level filter from Finding 21.

@@ -92,3 +92,62 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
   - 50ca13185ffcc7cd62268d933301d4634b9719c2 chart: add RBAC templates (ServiceAccount, ClusterRole, ClusterRoleBinding) (P0)
   - 70db0fe183f2286553d3676a26c5d810a73e8a7f chart: single source of truth for image version; fix repo/registry mismatch; clean placeholders
   - f0406af5603bbbb67914b4510827d3350596e63d chart: remove dead replicaCount value (P3)
+
+### Task 6 — Phase 2: Config & ops
+- Start: Thu Oct 29 04:48 PDT 2026
+- End: Thu Oct 29 04:53:17 PDT 2026
+- What: Config & ops review. Verified all 14 research leads against source (file:line); cross-referenced which were already covered by existing Findings; appended 15 new Findings (20-34) to REVIEW.md; then implemented 11 safe high-value fixes (one commit each), each with a test/check. No changes to CommandRunner design, controller logic, Helm chart, or FRR daemon startup.
+- Leads verified (file:line) and disposition:
+  - #2 ASN=0 passes validation → PRE-COVERED as Finding 8 (do not re-log).
+  - #3 empty-string namespace passes Validate → config.go:93 only checks len==0; bgp_controller.go:157-160 lists Services("") = K8s all-namespaces wildcard. NEW (Finding 22). FIXED.
+  - #4 no upper bound on loop_interval_seconds → config.go:98-100 only checks >0; bgp_controller.go:437-440 sleep() blocks the sole control loop. NEW (Finding 23). FIXED (cap at 3600).
+  - #5 log level/format case-sensitive, format parsed but unused → main.go:27 + config.go:34-35. NEW (Finding 34 for the format half). Level half folded into #6.
+  - #6 dead log level (flag + cfg.Logging.Level parsed/validated but never applied) → main.go:27 defines logLevel, never referenced; main.go uses bare stdlib log. NEW (Finding 21, P1, highest-value config item). FIXED.
+  - #7 frr.config_path getter never used → PRE-COVERED as Finding 11 (dead FRR knobs). Do not re-log.
+  - #8 missing config file → LoadConfig fail-open defaults (BGP enabled, ASN 0) → config.go:64-69. NEW (Finding 24). FIXED (fail-closed error).
+  - #9 ioutil.ReadFile deprecated → config.go:6,72. NEW (Finding 25). FIXED.
+  - #10 -log-level flag parsed but unused → same as #6. FOLDED into Finding 21.
+  - #16 Dockerfile builder golang:1.21-alpine BELOW go 1.27.3 → Dockerfile:1 vs go.mod:3. VERIFIED. NEW (Finding 20, P0 build break, highest-value). FIXED (golang:1.27-alpine).
+  - #17 COPY . . + no .dockerignore copies 51MB bin/ + repo → Dockerfile:13; git ls-files bin/ = bin/cosmolet-darwin-arm64. NEW (Finding 29). FIXED (.dockerignore).
+  - #18 RUN go mod tidy at build time → Dockerfile:21. NEW (Finding 30). FIXED (go mod verify).
+  - #19 EXPOSE 9090 unused; /metrics static stub on 8080 → Dockerfile:48; main.go:107,126-133. NEW (Finding 31). LEFT UNFIXED (product decision).
+  - #20 CMD never starts FRR daemon → PRE-COVERED by documented "FRR daemon not started" P0 (Design section). Do not re-log.
+  - #22 make docker-build tags 21c393c-dirty (no git tags) → git tag -l empty; Makefile:7. VERIFIED. NEW (Finding 32). LEFT UNFIXED (versioning-scheme decision).
+  - #23 Makefile image ref vs chart → PRE-COVERED as Finding 18 (commit 70db0fe). Do not re-log.
+  - #24 build.sh sets only main.Version, not GitCommit/BuildDate → scripts/build.sh:10 vs main.go:31-33. NEW (Finding 33). FIXED.
+  - #26 .gitignore still lists go.mod/go.sum though now committed → .gitignore:42-43. NEW (Finding 26). FIXED.
+  - #27 stale 51MB darwin-arm64 binary bin/cosmolet-darwin-arm64 TRACKED by git → git ls-files bin/. NEW (Finding 27). FIXED (git rm).
+  - #30 no CI (.github/workflows absent) → VERIFIED absent. NEW (Finding 28, P1). FIXED (ci.yml).
+- Findings added (20-34) and disposition:
+  - Finding 20 (P0, Dockerfile builder golang:1.21 < go 1.27.3): FIXED — commit 38ba404. Builder → golang:1.27-alpine. (Verified go.mod:3 `go 1.27.3`.)
+  - Finding 21 (P1, dead log level): FIXED — commit b74f9cd. New pkg/logging level-gate (Debug/Info/Warn/Error) + applyLogLevel in main.go (flag wins if set, else cfg.Logging.Level). Proven by pkg/logging/logging_test.go (6 cases: filtering, unknown-fallback-to-info, error-always, level-known).
+  - Finding 22 (P2, empty-string namespace → all-namespaces wildcard): FIXED — commit f8cd3ee. Validate() rejects empty/whitespace namespace entries. Proven by TestValidate_EmptyStringNamespaceIsInvalid + whitespace-only + normal-namespaces-valid.
+  - Finding 23 (P2, no upper bound on loop_interval_seconds): FIXED — commit f8cd3ee. Validate() caps at 3600 (maxLoopIntervalSeconds). Proven by above-max + enormous + at-max-valid tests.
+  - Finding 24 (P2, LoadConfig fail-open on missing file): FIXED — commit f8cd3ee. Now returns an error (fail-closed). Proven by TestLoadConfig_MissingFileFailsClosed + TestLoadConfig_ValidFile (round-trip).
+  - Finding 25 (P3, ioutil.ReadFile deprecated): FIXED — commit c2fb03d. → os.ReadFile.
+  - Finding 26 (P2, .gitignore lists go.mod/go.sum): FIXED — commit 96e577a. Removed entries; verified `git check-ignore go.mod go.sum` now exits 1 (no longer ignored).
+  - Finding 27 (P2, stale 51MB darwin-arm64 binary tracked): FIXED — commit 09781e4. `git rm --cached`; verified `git ls-files bin/` now empty.
+  - Finding 28 (P1, no CI): FIXED — commit 0dc017d. Added .github/workflows/ci.yml (build+vet+test -race on push/PR, go-version-file go.mod). Verified valid YAML.
+  - Finding 29 (P3, COPY . . + no .dockerignore): FIXED — commit a67a7ac. Added .dockerignore (excludes bin/, .git/, docs, chart, md, Dockerfile).
+  - Finding 30 (P2, go mod tidy at build time): FIXED — commit 287e2e4. → `RUN go mod verify` (reproducible; verifies committed go.sum).
+  - Finding 31 (P3, EXPOSE 9090 unused / :8080 metrics stub): LEFT UNFIXED (product decision). Which port should serve metrics; recommendation logged (drop 9090 until a real metrics server exists, or move Prometheus handler to 9090).
+  - Finding 32 (P2, no git tags → docker-build tag is opaque hash): LEFT UNFIXED (versioning-scheme decision). Recommendation: adopt semantic release tags (e.g. v0.1.0); Makefile git-describe then correct as-is.
+  - Finding 33 (P3, build.sh missing GitCommit/BuildDate): FIXED — commit 1490015. build.sh now sets all three ldflags, matching the Makefile. `bash -n` clean.
+  - Finding 34 (P3, logging.format parsed/validated but never applied): LEFT UNFIXED (needs a decision + larger change). stdlib log has no JSON formatter; a clean fix is a minimal JSON hook alongside Finding 21's level filter. Recommendation logged.
+- Validation:
+  - `go build ./...`: OK.
+  - `go vet ./...`: OK.
+  - `go test -race -count=1 ./...`: all pass — pkg/config (18 tests: 10 prior + 8 new), pkg/controller (11), pkg/logging (6 new). cmd/cosmolet and pkg/health have no test files.
+  - `ruby -ryaml -e 'YAML.load_file(...ci.yml)'`: valid YAML.
+  - Chart ConfigMap round-trip still passes Validate() (chart defaults use loop_interval_seconds: 30 and real namespaces — unaffected by the new cap/namespace rules).
+- Commits (one fix each):
+  - 38ba404 build: bump Dockerfile builder to golang:1.27-alpine to satisfy go 1.27.3 (P0)
+  - 287e2e4 build: replace 'go mod tidy' with 'go mod verify' for reproducible builds (P2)
+  - b74f9cd log: apply the documented -log-level flag and logging.level config (P1)
+  - f8cd3ee config: reject empty namespaces, cap loop interval, fail closed on missing file (P2 x3)
+  - c2fb03d config: replace deprecated ioutil.ReadFile with os.ReadFile (P3)
+  - 96e577a git: stop ignoring go.mod and go.sum (now tracked) (P2)
+  - 09781e4 build: remove stale 51MB darwin-arm64 binary from git (P2)
+  - a67a7ac build: add .dockerignore so COPY . . excludes non-build inputs (P3)
+  - 0dc017d ci: add minimal GitHub Actions workflow (build + vet + test -race) (P1)
+  - 1490015 build: set GitCommit and BuildDate in build.sh ldflags (P3)
