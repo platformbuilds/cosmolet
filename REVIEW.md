@@ -48,3 +48,45 @@ Cosmolet is documented as a Kubernetes controller that advertises Kubernetes ser
 | Config persistence to FRR | not explicitly promised in docs (implied by production use) | yes | `bgp_controller.go:270-275` runs `vtysh -c "write memory"` after each advertisement, persisting to `/etc/frr/frr.conf` | Ensures FRR survives restarts. No corresponding un-persist on service removal (routes are never withdrawn). |
 
 ## Findings
+
+### Finding 1
+- Severity: P0
+- File: pkg/controller/bgp_controller.go:144-147
+- What is wrong: When a service becomes unhealthy or is deleted, its BGP route is never withdrawn. The controller only adds routes but has no withdrawal mechanism.
+- How it fails in practice: A service with ready endpoints gets a BGP route. Later, all pods behind the service crash (endpoints become empty). The service is now unhealthy, but the BGP route remains advertised. External traffic continues to be routed to the service ClusterIP, which no longer has any healthy backends, causing traffic blackholing. Similarly, if a service is deleted, its route persists indefinitely in FRR.
+- Fix: fixed in bb2cdce — Added `withdrawStaleRoutes` and `withdrawAllRoutes` methods. The control loop now tracks healthy IPs each iteration and withdraws routes for services that are no longer healthy or no longer present. On shutdown, all routes are withdrawn.
+
+### Finding 2
+- Severity: P1
+- File: pkg/controller/bgp_controller.go (entire file)
+- What is wrong: No leader election mechanism exists. Every DaemonSet pod runs the full control loop and attempts to advertise/withdraw routes via vtysh.
+- How it fails in practice: In a multi-node cluster, all nodes' cosmolet pods will independently decide to advertise the same ClusterIPs. This causes: (1) duplicate `ip addr add` commands (harmless but noisy), (2) duplicate vtysh `network` commands (harmless, idempotent), (3) on withdrawal, race conditions where one node withdraws a route while another is trying to advertise it, potentially leaving the route in an inconsistent state. The README promises "only one instance manages BGP routes" but no such mechanism exists.
+- Fix: Left unfixed. Implementing leader election requires adding Kubernetes coordination.k8s.io/Lease resources, a leader election loop, and coordinating between pods. This is a significant architectural change that should be reviewed by a human to determine the desired semantics (e.g., should only the leader advertise, or should all nodes advertise their local view?). A minimal fix would use `k8s.io/client-go/tools/leaderelection` with a Lease lock.
+
+### Finding 3
+- Severity: P1
+- File: cmd/cosmolet/main.go:143-144
+- What is wrong: On shutdown, the controller cancels the context and sleeps for 5 seconds, but does not explicitly wait for the BGP controller goroutine to finish route withdrawal.
+- How it fails in practice: When the pod receives SIGTERM, `waitForShutdown` calls `cancel()` which signals the BGP controller to stop. The controller's `Start()` method then calls `withdrawAllRoutes()`, but the main goroutine only waits 5 seconds before the process exits. If route withdrawal takes longer than 5 seconds (e.g., many routes, slow FRR), the process may exit before all routes are withdrawn, leaving stale BGP routes.
+- Fix: Left unfixed as part of the broader leader election/coordination design. A proper fix requires the main goroutine to wait for the controller goroutine to complete (e.g., using a channel or errgroup) rather than using a fixed sleep. This is related to Finding 2 and should be addressed together.
+
+### Finding 4
+- Severity: P2
+- File: pkg/controller/bgp_controller.go:271-274
+- What is wrong: When `ip addr add` fails, the code logs a warning and continues to advertise the route via BGP. This can result in advertising a route for an IP that is not actually assigned to the local interface.
+- How it fails in practice: If the kernel rejects the IP assignment (e.g., IP already exists, permission denied, interface not ready), FRR will still advertise the route. Other nodes will try to send traffic to this node for that ClusterIP, but the node cannot receive it because the IP is not assigned, causing packet drops.
+- Fix: Left unfixed. The fix would be to return an error from `advertiseServiceViaBGP` if `ip addr add` fails, preventing the BGP advertisement. However, this changes behavior and may mask transient kernel errors. A human should decide whether to fail hard or retry.
+
+### Finding 5
+- Severity: P2
+- File: pkg/controller/bgp_controller.go:177-179
+- What is wrong: When fetching endpoints fails (e.g., service was just deleted), `performHealthCheck` returns `(false, err)`. The caller logs the error and returns `false` (unhealthy), which triggers route withdrawal. This is correct behavior, but the error is not propagated or retried.
+- How it fails in practice: If there's a transient API server error when fetching endpoints, the service is incorrectly marked as unhealthy and its route is withdrawn. On the next loop iteration (30s later), the route is re-advertised. This causes route flapping during API server instability.
+- Fix: Left unfixed. A proper fix would distinguish between "service not found" (permanently gone, withdraw route) and "transient API error" (retry next loop, don't withdraw). This requires tracking previous health state and only withdrawing after N consecutive failures.
+
+### Finding 6
+- Severity: P3
+- File: pkg/controller/bgp_controller.go:225, 254-262, 292
+- What is wrong: vtysh commands have no timeout. If FRR is unresponsive or hangs, the controller will block indefinitely.
+- How it fails in practice: If FRR crashes or hangs, the controller's main loop blocks on the vtysh command, preventing it from processing any other services or responding to shutdown signals. The liveness probe will eventually mark the pod as unhealthy, but the controller is stuck.
+- Fix: Left unfixed. The fix would be to use `exec.CommandContext` with a timeout (e.g., 10s) for all vtysh and ip commands. This is a straightforward change but was not prioritized for this pass.
