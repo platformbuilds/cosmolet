@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/controller"
@@ -73,19 +72,27 @@ func main() {
 		log.Fatalf("Failed to create BGP service controller: %v", err)
 	}
 
-	// Start controller in goroutine
-	go func() {
-		if err := bgpController.Start(); err != nil {
-			logging.Error("BGP controller error: %v", err)
-			cancel()
-		}
-	}()
-
 	// Mark as ready
 	healthChecker.SetReady(true)
 
-	// Wait for shutdown signal
-	waitForShutdown(cancel)
+	// Run the controller on this goroutine so shutdown blocks until it has
+	// finished withdrawing routes. Start returns only once the context is
+	// cancelled AND withdrawAllRoutes has completed (Findings 2, 3) — no more
+	// fixed 5 s sleep that could let the process exit before withdrawal.
+	startErr := make(chan error, 1)
+	go func() { startErr <- bgpController.Start() }()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigChan
+	logging.Info("Received signal: %s — waiting for the controller to withdraw routes and stop", sig)
+
+	cancel()
+
+	err = <-startErr
+	if err != nil {
+		logging.Error("BGP controller error during shutdown: %v", err)
+	}
 
 	logging.Info("Shutting down Cosmolet BGP Service Controller")
 }
@@ -151,14 +158,4 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "cosmolet_info{version=\"%s\",commit=\"%s\"} 1\n", Version, GitCommit)
 }
 
-func waitForShutdown(cancel context.CancelFunc) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	sig := <-sigChan
-	logging.Info("Received signal: %s", sig)
-
-	// Give some time for graceful shutdown
-	cancel()
-	time.Sleep(5 * time.Second)
-}

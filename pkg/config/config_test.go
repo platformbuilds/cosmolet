@@ -363,6 +363,21 @@ func TestGetFRRConfigPath(t *testing.T) {
 	}
 }
 
+func TestGetVtyshSocketArgs_Set(t *testing.T) {
+	c := &Config{FRR: FRRConfig{SocketPath: "/run/frr/vty"}}
+	got := c.GetVtyshSocketArgs()
+	if len(got) != 2 || got[0] != "-s" || got[1] != "/run/frr/vty" {
+		t.Fatalf("GetVtyshSocketArgs() = %v, want [-s /run/frr/vty]", got)
+	}
+}
+
+func TestGetVtyshSocketArgs_Empty(t *testing.T) {
+	c := &Config{}
+	if got := c.GetVtyshSocketArgs(); got != nil {
+		t.Fatalf("GetVtyshSocketArgs() = %v, want nil when socket path empty", got)
+	}
+}
+
 func TestYAMLSnakeCaseTagsMapToCorrectFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

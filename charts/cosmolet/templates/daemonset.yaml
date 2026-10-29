@@ -19,6 +19,17 @@ spec:
       - name: cosmolet
         image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        # Downward API: identity for leader election (Finding 2) and the
+        # coordination.k8s.io Lease namespace.
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         resources:

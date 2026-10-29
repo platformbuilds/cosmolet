@@ -239,20 +239,39 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - End: (filled at commit)
 - What: Final wrap-up entry. The full 4-phase review is complete on branch `review-overnight` (32 commits ahead of `main`).
 
+### Task 13 — Human-selected fixes: 7 findings
+- Start: Thu Oct 29 11:30 PDT 2026
+- End: (filled at commit)
+- What: Fixed the 7 findings the human selected for this pass (findings 2, 3, 4, 6, 11, 12, 35). Code changes:
+  - Finding 2 (P1, no leader election): `Start()` now gates the control loop behind `k8s.io/client-go/tools/leaderelection.RunOrDie` with a `coordination.k8s.io/Lease` lock (`cosmolet-leader`, 15 s/10 s/5 s, overridable in tests). Only the leader runs `runLeaderLoop`; all pods keep K8s/FRR health checks. Chart: ClusterRole gains `leases` RBAC (every pod must read the lease to observe leadership) and the DaemonSet injects `POD_NAME`/`POD_NAMESPACE` via Downward API.
+  - Finding 3 (P1, shutdown leaves stale routes): `cmd/cosmolet/main.go` blocks on the controller — runs `Start()` in a goroutine, cancels on SIGINT/SIGTERM, then waits for `Start()` to return (which happens only after the leader lock is released and `withdrawAllRoutes()` completes). The fixed 5 s sleep and `waitForShutdown` helper are removed.
+  - Finding 4 (P1, BGP advertised when `ip addr add` failed): `advertiseServiceViaBGP` now returns an error when `ip addr add` fails, so the BGP `network` command is never issued for an IP the node cannot receive.
+  - Finding 6 (P1, vtysh/ip hangs block the loop): `execRunner` uses `exec.CommandContext` with a 10 s timeout.
+  - Finding 11 (P2, dead `frr.socket_path`): `config.GetVtyshSocketArgs()` returns `[-s <socket_path>]`; every `vtysh` call appends it. `frr.config_path` remains dead (not a `vtysh` flag) and is left for a human decision.
+  - Finding 12 (P2, `write memory` every loop): advertise/withdraw no longer call `write memory`; `runControlLoop` snapshots the advertised set and calls `persistFRRConfig()` once per iteration, only when `routeSetChanged()` is true.
+  - Finding 35 (P2, `lo` vs `lo0` portability): `isServiceAdvertisedByFRR` now uses `loopbackInterface()` (enumerates `net.Interfaces()` for `FlagLoopback`) instead of `net.InterfaceByName("lo")`.
+  Tests added: leader election (OnStartedLeading/OnStoppedLeading/OnNewLeader), fail-hard ip addr add, vtysh socket arg, persist-on-change, `routeSetChanged`, `loopbackInterface`. `go mod tidy` pulled in `k8s.io/client-go/tools/leaderelection` deps.
+- Result:
+  - 7 findings FIXED (2, 3, 4, 6, 11, 12, 35); 5 remain unfixed with recommendations (5, 19, 31, 32, 34) plus the residual `frr.config_path` decision from 11.
+  - Coverage moved: pkg/config 94.7%→95.1% (32 tests), pkg/controller 50.5%→53.5% (25 tests, 4 skip). 79 test functions, 4 skip on macOS, 0 fail under `-race`.
+  - REVIEW.md updated: Design-vs-Implementation rows (leader election, graceful shutdown, config persistence), finding sections 2/3/4/6/11/12/35, exec-summary counts (29 fixed / 5 unfixed, 79 tests), coverage table, and the "decisions needed" list.
+  - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `helm lint charts/cosmolet` all pass.
+- Commit: (see git log; this commit)
+
 ## FINAL RUNNING SUMMARY
 
 **Phase 1 — Design (Tasks 1-2).** Documented what the README promises and cross-referenced it against the code. 12 promises: 5 "no" (LoadBalancer, ExternalIPs/NodePort, leader election, failover/HA, RBAC manifests, security hardening), 2 "partly" (namespace-scoped discovery not cluster-wide; Prometheus is a static stub), 5 "yes". Headline: the "only one instance manages BGP routes" and "proper RBAC" claims have no code/chart backing.
 
 **Phase 2 — Review (Tasks 3-6).** 35 findings logged (3 P0, 8 P1, 14 P2, 10 P3).
-- Correctness (Task 3/3b): Finding 1 P0 no route withdrawal → FIXED; Finding 2 P1 no leader election (unfixed); Finding 3 P1 no shutdown cleanup (unfixed); Finding 7 P1 advertised-marked-on-failure → FIXED (CommandRunner refactor).
-- FRR integration (Task 4): Finding 8 P1 ASN=0 → FIXED; Finding 9 P1 no IPv6 → FIXED; Finding 10 P2 fragile output parse → FIXED (`*>`); Findings 11/12 (dead FRR knobs, write-memory churn) logged unfixed.
+- Correctness (Task 3/3b): Finding 1 P0 no route withdrawal → FIXED; Finding 2 P1 no leader election → FIXED (Task 13, Lease-based); Finding 3 P1 no shutdown cleanup → FIXED (Task 13, blocking shutdown); Finding 4 P1 `ip addr add` ignored → FIXED (Task 13, fail hard); Finding 5 P1 transient-vs-deleted health → unfixed; Finding 6 P1 vtysh/ip hang → FIXED (Task 13, 10 s timeout); Finding 7 P1 advertised-marked-on-failure → FIXED (CommandRunner refactor).
+- FRR integration (Task 4 + Task 13): Finding 8 P1 ASN=0 → FIXED; Finding 9 P1 no IPv6 → FIXED; Finding 10 P2 fragile output parse → FIXED (`*>`); Finding 11 P2 dead `frr.socket_path` → FIXED (Task 13, `vtysh -s`; `config_path` still dead); Finding 12 P2 `write memory` every loop → FIXED (Task 13, persist only on route-set change).
 - Chart (Task 5): Finding 13 P1 no ConfigMap → FIXED; Finding 14 P0 no RBAC templates → FIXED; Findings 15/16/17/18 (version, placeholders, dead replicaCount, image-ref) → FIXED; Finding 19 (no probes) unfixed.
 - Config & ops (Task 6): Finding 20 P0 Docker build break → FIXED; Finding 21 P1 dead log level → FIXED; Findings 22-33 (empty-ns, loop cap, fail-closed, ioutil, .gitignore, stale binary, no CI, .dockerignore, go-mod-tidy, EXPOSE 9090, no tags, build.sh) → 10 FIXED, 3 unfixed (31/32/34).
 
-**Phase 3 — Tests (Tasks 7-10).** pkg/config 73.7%→94.7%; pkg/controller 23.8%→50.5% (fake clientset); pkg/health 0%→100%; pkg/logging 93.1%; cmd/cosmolet 0% (thin main). 76 tests pass under `-race` (4 skip on macOS `lo`/`lo0` — Finding 35). Full coverage table added to REVIEW.md.
+**Phase 3 — Tests (Tasks 7-10) + Task 13.** pkg/config 73.7%→95.1%; pkg/controller 23.8%→53.5% (fake clientset); pkg/health 0%→100%; pkg/logging 93.1%; cmd/cosmolet 0% (thin main). 79 tests pass under `-race` (4 skip on macOS — the loopback-gated advertise/withdraw-by-IP tests, no FRR/`ip` binary; Finding 35's `lo`/`lo0` issue is fixed). Full coverage table added to REVIEW.md.
 
 **Phase 4 — Wrap (Tasks 11-12).** Executive Summary written; running summary is this entry.
 
-**Bottom line.** The controller's core loop now converges (advertise + withdraw + shutdown), the image builds, the chart actually creates the ServiceAccount/RBAC/ConfigMap it references, the most misleading config knobs are enforced or wired, and there is CI. The remaining work is deliberate architecture: leader election + shutdown coordination, FRR-daemon ownership, container privilege hardening, and the smaller dead-knob/portability items — all logged with recommendations in REVIEW.md.
+**Bottom line.** The controller's core loop now converges (advertise + withdraw + shutdown), has leader election and blocking shutdown coordination (Task 13), fails hard when `ip addr add` fails, the image builds, the chart actually creates the ServiceAccount/RBAC/ConfigMap it references, the most misleading config knobs are enforced or wired, and there is CI. The remaining work is deliberate architecture: FRR-daemon ownership, container privilege hardening, and the smaller dead-knob/probes/metrics/versioning items — all logged with recommendations in REVIEW.md.
 
-**Decisions needed from a human (12 unfixed findings + documented design items):** leader election (2), shutdown coordination (3), ip-addr-add fail-hard-vs-retry (4), transient-vs-deleted health handling (5), vtysh timeout (6), dead FRR knobs (11), write-memory policy (12), liveness/readiness probes (19), metrics port 9090 (31), git release-tag scheme (32), JSON log formatter (34), lo/lo0 portability (35); plus the Design-table items: privileged/container hardening and who runs the FRR daemon.
+**Decisions needed from a human (5 unfixed findings + documented design items):** transient-vs-deleted health handling (5), liveness/readiness probes (19), metrics port 9090 (31), git release-tag scheme (32), JSON log formatter (34); plus the residual `frr.config_path` dead-knob decision from Finding 11; plus the Design-table items: privileged/container hardening and who runs the FRR daemon.

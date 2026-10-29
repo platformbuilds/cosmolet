@@ -31,6 +31,18 @@ rules:
       - get
       - list
       - watch
+  # Every pod competes for the coordination.k8s.io Lease that gates the
+  # leader-election loop (Finding 2). create/get/watch on leases are
+  # needed to acquire, renew, and observe the cosmolet-leader lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -175,6 +175,16 @@ func (c *Config) GetFRRSocketPath() string {
 	return c.FRR.SocketPath
 }
 
+// GetVtyshSocketArgs returns the extra arguments to pass to vtysh so it talks
+// to the configured FRR socket (Finding 11). When the socket path is empty it
+// returns nil and vtysh uses its default socket.
+func (c *Config) GetVtyshSocketArgs() []string {
+	if c.FRR.SocketPath == "" {
+		return nil
+	}
+	return []string{"-s", c.FRR.SocketPath}
+}
+
 // GetFRRConfigPath returns the FRR config path
 func (c *Config) GetFRRConfigPath() string {
 	return c.FRR.ConfigPath

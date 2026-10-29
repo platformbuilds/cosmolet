@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 
@@ -120,7 +121,7 @@ func TestWithdrawAllRoutes_ClearsMap(t *testing.T) {
 	}
 }
 
-func TestWithdrawServiceViaBGP_RunsNetworkNoWriteDel(t *testing.T) {
+func TestWithdrawServiceViaBGP_RunsNetworkNoDel(t *testing.T) {
 	fr := &fakeRunner{}
 	c := newTestController(fr.run)
 
@@ -129,11 +130,13 @@ func TestWithdrawServiceViaBGP_RunsNetworkNoWriteDel(t *testing.T) {
 	if !fr.hasCall("no network 10.1.2.3/32") {
 		t.Errorf("expected 'no network' command, got: %v", fr.calls)
 	}
-	if !fr.hasCall("write memory") {
-		t.Errorf("expected 'write memory' command, got: %v", fr.calls)
-	}
 	if !fr.hasCall("ip addr del 10.1.2.3/32 dev lo") {
 		t.Errorf("expected 'ip addr del' command, got: %v", fr.calls)
+	}
+	// Persistence is done once per loop by persistFRRConfig, not per-withdraw
+	// (Finding 12). A single withdraw must not rewrite frr.conf.
+	if fr.hasCall("write memory") {
+		t.Errorf("withdraw must not run 'write memory' per call (Finding 12), got: %v", fr.calls)
 	}
 }
 
@@ -150,8 +153,10 @@ func TestAdvertiseServiceViaBGP_SuccessMarksAdvertised(t *testing.T) {
 	if !fr.hasCall("network 10.2.0.5/32") {
 		t.Errorf("expected 'network' command, got: %v", fr.calls)
 	}
-	if !fr.hasCall("write memory") {
-		t.Errorf("expected 'write memory', got: %v", fr.calls)
+	// Persistence is done once per loop by persistFRRConfig, not per-advertise
+	// (Finding 12). A single advertise must not rewrite frr.conf.
+	if fr.hasCall("write memory") {
+		t.Errorf("advertise must not run 'write memory' per call (Finding 12), got: %v", fr.calls)
 	}
 }
 
@@ -238,5 +243,86 @@ func TestWithdrawServiceViaBGP_IPv6UsesFamilyAndPrefix(t *testing.T) {
 	}
 	if !fr.hasCall("ip addr del fd00:1234::42/128 dev lo") {
 		t.Errorf("expected ipv6 loopback del, got: %v", fr.calls)
+	}
+}
+
+func TestPersistFRRConfig_RunsWriteMemory(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+
+	c.persistFRRConfig()
+
+	if !fr.hasCall("write memory") {
+		t.Errorf("expected persistFRRConfig to run 'write memory', got: %v", fr.calls)
+	}
+}
+
+func TestRouteSetChanged_DetectsChange(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+
+	// Baseline: nothing advertised.
+	c.snapshotAdvertised()
+	if c.routeSetChanged() {
+		t.Error("no change expected with an empty baseline")
+	}
+
+	// Add a route: change should be detected.
+	c.advertised["10.0.0.1"] = true
+	if !c.routeSetChanged() {
+		t.Error("change expected after adding a route")
+	}
+
+	// Snapshot again, then remove it: change detected.
+	c.snapshotAdvertised()
+	if c.routeSetChanged() {
+		t.Error("no change expected after re-snapshot")
+	}
+	delete(c.advertised, "10.0.0.1")
+	if !c.routeSetChanged() {
+		t.Error("change expected after removing a route")
+	}
+}
+
+// Finding 4: a failed `ip addr add` must abort the advertisement (fail hard)
+// rather than advertising a route for an IP this node cannot receive.
+func TestAdvertiseServiceViaBGP_FailsHardOnIPAddrAdd(t *testing.T) {
+	fr := &fakeRunner{failFor: []string{"ip addr add"}}
+	c := newTestController(fr.run)
+
+	if err := c.advertiseServiceViaBGP("10.9.9.9"); err == nil {
+		t.Fatal("expected an error when 'ip addr add' fails")
+	}
+	if fr.hasCall("network 10.9.9.9/32") {
+		t.Errorf("must not advertise a route after 'ip addr add' failed, got: %v", fr.calls)
+	}
+	if _, ok := c.advertised["10.9.9.9"]; ok {
+		t.Error("must not mark the route advertised when ip addr add failed")
+	}
+}
+
+// Finding 11: a configured FRR socket path must be passed to vtysh via -s.
+func TestAdvertiseServiceViaBGP_PassesVtyshSocketArg(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+	c.config.FRR.SocketPath = "/run/frr/vty"
+
+	if err := c.advertiseServiceViaBGP("10.4.4.4"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fr.hasCall("vtysh -c configure terminal") || !fr.hasCall("-s /run/frr/vty") {
+		t.Errorf("expected vtysh to be called with -s /run/frr/vty, got: %v", fr.calls)
+	}
+}
+
+// Finding 35: the loopback must be found by flag, so both "lo" (Linux) and
+// "lo0" (macOS) are returned by loopbackInterface() rather than hardcoding one.
+func TestLoopbackInterface_FoundByFlag(t *testing.T) {
+	iface, err := loopbackInterface()
+	if err != nil {
+		t.Fatalf("loopbackInterface() error: %v", err)
+	}
+	if iface.Flags&net.FlagLoopback == 0 {
+		t.Fatalf("loopbackInterface() returned %s which is not flagged loopback", iface.Name)
 	}
 }
