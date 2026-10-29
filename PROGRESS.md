@@ -215,4 +215,4 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Result: 16 new test functions. Coverage pkg/health 0.0% → 100.0%.
 - Skipped: none. The /healthz and /readyz routes themselves (mux registration, 8080 port) live in cmd/cosmolet/main.go (startHealthServer) and are out of scope; the handler logic behind them is fully covered here.
 - Validation: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (health: 16 tests).
-- Commit: 7625d6b (amended after updating this entry with the final hash)
+- Commit: f9f6e70 (tests + PROGRESS.md entry); hash recorded in the following commit
