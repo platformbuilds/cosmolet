@@ -170,3 +170,226 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 		t.Fatalf("expected ASN 65000, got %d", cfg.BGP.ASN)
 	}
 }
+
+func TestLoadConfig_HappyPathParsesAllFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := `services:
+  namespaces:
+    - production
+    - kube-system
+loop_interval_seconds: 15
+bgp:
+  enabled: true
+  asn: 64512
+logging:
+  level: debug
+  format: json
+frr:
+  socket_path: /run/frr/vty
+  config_path: /etc/frr/frr.conf
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error loading valid config: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loaded config failed Validate: %v", err)
+	}
+	if len(cfg.Services.Namespaces) != 2 || cfg.Services.Namespaces[0] != "production" || cfg.Services.Namespaces[1] != "kube-system" {
+		t.Fatalf("unexpected namespaces: %v", cfg.Services.Namespaces)
+	}
+	if cfg.LoopIntervalSeconds != 15 {
+		t.Fatalf("expected loop interval 15, got %d", cfg.LoopIntervalSeconds)
+	}
+	if !cfg.BGP.Enabled {
+		t.Fatal("expected BGP enabled")
+	}
+	if cfg.BGP.ASN != 64512 {
+		t.Fatalf("expected ASN 64512, got %d", cfg.BGP.ASN)
+	}
+	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
+		t.Fatalf("unexpected logging config: %+v", cfg.Logging)
+	}
+	if cfg.FRR.SocketPath != "/run/frr/vty" {
+		t.Fatalf("expected socket path /run/frr/vty, got %s", cfg.FRR.SocketPath)
+	}
+	if cfg.FRR.ConfigPath != "/etc/frr/frr.conf" {
+		t.Fatalf("expected config path /etc/frr/frr.conf, got %s", cfg.FRR.ConfigPath)
+	}
+}
+
+func TestLoadConfig_InvalidYAMLReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "services: [unbalanced\n  namespaces: {{{\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestLoadConfig_InvalidYAMLOffsetTypeReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "loop_interval_seconds: notanumber\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error for wrong-type YAML value")
+	}
+}
+
+func TestLoadConfig_ValidateErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Valid YAML, but ASN out of range with BGP enabled: Validate must reject.
+	body := "services:\n  namespaces:\n    - default\nbgp:\n  enabled: true\n  asn: 9999999999\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected Validate error to propagate for out-of-range ASN")
+	}
+}
+
+func TestLoadConfig_ValidateErrorEmptyNamespace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "services:\n  namespaces:\n    - \"\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected Validate error to propagate for empty namespace")
+	}
+}
+
+func TestLoadConfig_OmittedFieldsKeepDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Omitted keys keep the defaults set by LoadConfig. BGP defaults to
+	// enabled, so a valid minimal config must still supply an ASN.
+	body := "services:\n  namespaces:\n    - only-namespace\nbgp:\n  asn: 65000\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error loading minimal config: %v", err)
+	}
+	if len(cfg.Services.Namespaces) != 1 || cfg.Services.Namespaces[0] != "only-namespace" {
+		t.Fatalf("unexpected namespaces: %v", cfg.Services.Namespaces)
+	}
+	if cfg.LoopIntervalSeconds != 30 {
+		t.Fatalf("expected default loop interval 30, got %d", cfg.LoopIntervalSeconds)
+	}
+	if !cfg.BGP.Enabled {
+		t.Fatal("expected BGP to be enabled by default")
+	}
+	if cfg.BGP.ASN != 65000 {
+		t.Fatalf("expected ASN 65000 from file, got %d", cfg.BGP.ASN)
+	}
+	if cfg.Logging.Level != "info" || cfg.Logging.Format != "text" {
+		t.Fatalf("unexpected default logging: %+v", cfg.Logging)
+	}
+	if cfg.FRR.SocketPath != "/var/run/frr" {
+		t.Fatalf("expected default socket path /var/run/frr, got %s", cfg.FRR.SocketPath)
+	}
+}
+
+func TestLoadConfig_MissingASNWithDefaultBGPEnabledFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// BGP defaults to enabled with ASN 0, which is invalid: fail-closed.
+	body := "services:\n  namespaces:\n    - only-namespace\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error: default BGP enabled with zero ASN is invalid")
+	}
+}
+
+func TestGetNamespaces(t *testing.T) {
+	c := &Config{Services: ServicesConfig{Namespaces: []string{"a", "b"}}}
+	got := c.GetNamespaces()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("GetNamespaces() = %v", got)
+	}
+}
+
+func TestGetLoopInterval(t *testing.T) {
+	c := &Config{LoopIntervalSeconds: 42}
+	if got := c.GetLoopInterval(); got != 42 {
+		t.Fatalf("GetLoopInterval() = %d", got)
+	}
+}
+
+func TestGetBGPASN(t *testing.T) {
+	c := &Config{BGP: BGPConfig{ASN: 65021}}
+	if got := c.GetBGPASN(); got != 65021 {
+		t.Fatalf("GetBGPASN() = %d", got)
+	}
+}
+
+func TestIsBGPEnabled(t *testing.T) {
+	if (&Config{}).IsBGPEnabled() {
+		t.Fatal("expected BGP disabled for zero-value config")
+	}
+	c := &Config{BGP: BGPConfig{Enabled: true}}
+	if !c.IsBGPEnabled() {
+		t.Fatal("expected BGP enabled")
+	}
+}
+
+func TestGetFRRSocketPath(t *testing.T) {
+	c := &Config{FRR: FRRConfig{SocketPath: "/run/frr/vty"}}
+	if got := c.GetFRRSocketPath(); got != "/run/frr/vty" {
+		t.Fatalf("GetFRRSocketPath() = %s", got)
+	}
+}
+
+func TestGetFRRConfigPath(t *testing.T) {
+	c := &Config{FRR: FRRConfig{ConfigPath: "/etc/frr/frr.conf"}}
+	if got := c.GetFRRConfigPath(); got != "/etc/frr/frr.conf" {
+		t.Fatalf("GetFRRConfigPath() = %s", got)
+	}
+}
+
+func TestYAMLSnakeCaseTagsMapToCorrectFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "services:\n  namespaces:\n    - ns-a\nloop_interval_seconds: 7\nbgp:\n  enabled: true\n  asn: 100\nlogging:\n  level: warn\n  format: json\nfrr:\n  socket_path: /tmp/frr.sock\n  config_path: /tmp/frr.conf\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LoopIntervalSeconds != 7 {
+		t.Errorf("loop_interval_seconds did not map to LoopIntervalSeconds: got %d", cfg.LoopIntervalSeconds)
+	}
+	if cfg.BGP.ASN != 100 {
+		t.Errorf("bgp.asn did not map to BGP.ASN: got %d", cfg.BGP.ASN)
+	}
+	if cfg.Logging.Level != "warn" {
+		t.Errorf("logging.level did not map to Logging.Level: got %q", cfg.Logging.Level)
+	}
+	if cfg.FRR.SocketPath != "/tmp/frr.sock" {
+		t.Errorf("frr.socket_path did not map to FRR.SocketPath: got %q", cfg.FRR.SocketPath)
+	}
+	if cfg.FRR.ConfigPath != "/tmp/frr.conf" {
+		t.Errorf("frr.config_path did not map to FRR.ConfigPath: got %q", cfg.FRR.ConfigPath)
+	}
+	if len(cfg.Services.Namespaces) != 1 || cfg.Services.Namespaces[0] != "ns-a" {
+		t.Errorf("services.namespaces did not map to Services.Namespaces: got %v", cfg.Services.Namespaces)
+	}
+}

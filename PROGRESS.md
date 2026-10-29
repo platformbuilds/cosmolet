@@ -151,3 +151,21 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
   - a67a7ac build: add .dockerignore so COPY . . excludes non-build inputs (P3)
   - 0dc017d ci: add minimal GitHub Actions workflow (build + vet + test -race) (P1)
   - 1490015 build: set GitCommit and BuildDate in build.sh ldflags (P3)
+
+### Task 7 — Phase 3: pkg/config tests
+- Start: Thu Oct 29 04:55 PDT 2026
+- End: Thu Oct 29 04:56:22 PDT 2026
+- What: Added LoadConfig and accessor tests to pkg/config/config_test.go covering previously untested code paths. New tests:
+  - TestLoadConfig_HappyPathParsesAllFields: full realistic YAML (namespaces, loop interval, bgp enabled+asn, logging level+format, frr socket_path+config_path); asserts every parsed field and that Validate passes.
+  - TestLoadConfig_InvalidYAMLReturnsError: malformed YAML → error.
+  - TestLoadConfig_InvalidYAMLOffsetTypeReturnsError: wrong-type value (string into int) → error.
+  - TestLoadConfig_ValidateErrorPropagates: valid YAML with out-of-range ASN + bgp enabled → Validate error surfaces.
+  - TestLoadConfig_ValidateErrorEmptyNamespace: valid YAML with empty namespace → Validate error surfaces.
+  - TestLoadConfig_OmittedFieldsKeepDefaults: minimal file (namespaces + asn only); asserts defaults are preserved for loop_interval (30), bgp.enabled (true), logging (info/text), frr.socket_path (/var/run/frr).
+  - TestLoadConfig_MissingASNWithDefaultBGPEnabledFails: minimal file with namespaces only; BGP defaults to enabled with ASN 0 → fail-closed error (documents that defaults do not yield a valid config without an ASN).
+  - TestGetNamespaces, TestGetLoopInterval, TestGetBGPASN, TestIsBGPEnabled, TestGetFRRSocketPath, TestGetFRRConfigPath: simple value assertions for every accessor helper.
+  - TestYAMLSnakeCaseTagsMapToCorrectFields: guards the snake_case YAML tag → struct field mapping (chart finding on camelCase vs snake_case).
+- Result: 12 new test functions. No non-test code changed.
+- Coverage: pkg/config 73.7% → 94.7%.
+- Validation: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass.
+- Commit: be77153b61eb6c53f154a7d5d130b875290266e1 (this commit; contains PROGRESS.md with this hash)
