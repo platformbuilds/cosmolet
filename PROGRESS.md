@@ -40,3 +40,11 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Commits:
   - bb2cdce: fix: add route withdrawal for deleted/unhealthy services (P0)
   - f50e682: docs: add correctness findings to REVIEW.md
+
+### Task 3b — Fixup: CommandRunner interface + advertised-tracking bug
+- Start: Thu Oct 29 04:22 PDT 2026
+- End: (filled at commit)
+- What: The subagent's Task 3 tests invoked real vtysh/ip binaries (they would fail on any machine without FRR) and the advertised-map was marked as advertised even when the vtysh `network` command failed — meaning a failed advertise would never retry and the route would be wrongly withdrawn on the next loop. Introduced a `CommandRunner` interface (default `execRunner` = unchanged production behaviour; `fakeRunner` for tests) and fixed `processService` to only mark an IP advertised when `advertiseServiceViaBGP` succeeds. All vtysh/ip call sites now go through `c.run`. Rewrote `bgp_controller_test.go` to use the fake runner (no real binaries).
+- Result: 7 controller tests pass under `go test -race -count=1`. No production behavior change.
+- New finding: P1 "advertised map marked on vtysh failure" — fixed in this commit (see REVIEW.md).
+- Commit: (filled below)

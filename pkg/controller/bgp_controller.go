@@ -18,15 +18,28 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// CommandRunner runs an external command and returns its combined output.
+// It exists so tests can substitute a fake runner instead of invoking real
+// vtysh/ip binaries. Production behaviour is unchanged: execRunner runs the
+// command verbatim.
+type CommandRunner func(name string, args ...string) ([]byte, error)
+
+// execRunner is the default CommandRunner: it runs the command via os/exec.
+func execRunner(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.CombinedOutput()
+}
+
 // BGPServiceController manages BGP advertisements for Kubernetes services
 type BGPServiceController struct {
 	client        kubernetes.Interface
 	config        *config.Config
 	ctx           context.Context
 	healthChecker *health.Checker
+	run           CommandRunner
 
-	mu          sync.Mutex
-	advertised  map[string]bool
+	mu         sync.Mutex
+	advertised map[string]bool
 }
 
 // NewBGPServiceController creates a new BGP service controller
@@ -46,8 +59,25 @@ func NewBGPServiceController(cfg *config.Config, ctx context.Context) (*BGPServi
 		config:        cfg,
 		ctx:           ctx,
 		healthChecker: health.NewChecker(),
+		run:           execRunner,
 		advertised:    make(map[string]bool),
 	}, nil
+}
+
+// newControllerForTest constructs a controller with an injected client and
+// command runner, bypassing kubeconfig discovery. It is exported for tests.
+func newControllerForTest(client kubernetes.Interface, cfg *config.Config, ctx context.Context, run CommandRunner) *BGPServiceController {
+	if run == nil {
+		run = execRunner
+	}
+	return &BGPServiceController{
+		client:        client,
+		config:        cfg,
+		ctx:           ctx,
+		healthChecker: health.NewChecker(),
+		run:           run,
+		advertised:    make(map[string]bool),
+	}
 }
 
 // Start begins the main control loop
@@ -178,7 +208,8 @@ func (c *BGPServiceController) processService(service v1.Service) bool {
 		return true
 	}
 
-	// Advertise the Service ClusterIP using FRR
+	// Advertise the Service ClusterIP using FRR. Only mark as advertised on
+	// success; on failure leave it out of the map so the next loop retries.
 	log.Printf("Advertising service %s (ClusterIP: %s) via BGP", serviceKey, clusterIP)
 	if err := c.advertiseServiceViaBGP(clusterIP); err != nil {
 		log.Printf("Error advertising service %s via BGP: %v", serviceKey, err)
@@ -244,8 +275,7 @@ func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool,
 	log.Printf("ClusterIP %s is on loopback interface", clusterIP)
 
 	// Step 2: Check if BGP is advertising this IP and sourced locally
-	cmd := exec.Command("vtysh", "-c", "show ip bgp " + clusterIP)
-	output, err := cmd.CombinedOutput()
+	output, err := c.run("vtysh", "-c", "show ip bgp "+clusterIP)
 	if err != nil {
 		return false, fmt.Errorf("failed to check BGP advertisement for %s: %v\nOutput: %s", clusterIP, err, output)
 	}
@@ -257,7 +287,9 @@ func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool,
 	return isLocal, nil
 }
 
-// advertiseServiceViaBGP adds loopback route and configures FRR
+// advertiseServiceViaBGP adds the loopback address and configures FRR.
+// Returns an error if any FRR command fails; callers must NOT mark the route
+// as advertised in that case (so the next loop can retry).
 func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	if !c.config.IsBGPEnabled() {
 		log.Printf("BGP is disabled in configuration, skipping advertisement")
@@ -268,12 +300,11 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	asn := c.config.GetBGPASN()
 	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
-	assignCmd := exec.Command("ip", "addr", "add", route, "dev", "lo")
-	if output, err := assignCmd.CombinedOutput(); err != nil {
+	if output, err := c.run("ip", "addr", "add", route, "dev", "lo"); err != nil {
 		log.Printf("Warning: failed to assign IP to loopback: %v\nOutput: %s", err, output)
 	}
 
-	cmd := exec.Command(
+	output, err := c.run(
 		"vtysh",
 		"-c", "configure terminal",
 		"-c", fmt.Sprintf("router bgp %d", asn),
@@ -282,15 +313,12 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 		"-c", "exit-address-family",
 		"-c", "exit",
 	)
-
-	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to advertise route via BGP: %v\nOutput: %s", err, output)
 	}
 	log.Printf("vtysh route advertisement successful: %s", output)
 
-	writeCmd := exec.Command("vtysh", "-c", "write memory")
-	if output, err := writeCmd.CombinedOutput(); err != nil {
+	if output, err := c.run("vtysh", "-c", "write memory"); err != nil {
 		return fmt.Errorf("failed to persist config to /etc/frr/frr.conf: %v\nOutput: %s", err, output)
 	}
 
@@ -298,12 +326,14 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	return nil
 }
 
-// withdrawServiceViaBGP removes the BGP route and loopback IP for a cluster IP
+// withdrawServiceViaBGP removes the BGP route and loopback IP for a cluster IP.
+// Best-effort: each command failure is logged, not returned, because the goal
+// is to converge FRR state on shutdown/withdrawal even if one step fails.
 func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
 	route := fmt.Sprintf("%s/32", clusterIP)
 	asn := c.config.GetBGPASN()
 
-	cmd := exec.Command(
+	if output, err := c.run(
 		"vtysh",
 		"-c", "configure terminal",
 		"-c", fmt.Sprintf("router bgp %d", asn),
@@ -311,20 +341,17 @@ func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
 		"-c", fmt.Sprintf("no network %s", route),
 		"-c", "exit-address-family",
 		"-c", "exit",
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	); err != nil {
 		log.Printf("Warning: failed to withdraw BGP route %s: %v\nOutput: %s", route, err, output)
 	} else {
 		log.Printf("Withdrawn BGP route %s", route)
 	}
 
-	writeCmd := exec.Command("vtysh", "-c", "write memory")
-	if output, err := writeCmd.CombinedOutput(); err != nil {
+	if output, err := c.run("vtysh", "-c", "write memory"); err != nil {
 		log.Printf("Warning: failed to persist FRR config after withdrawal: %v\nOutput: %s", err, output)
 	}
 
-	delCmd := exec.Command("ip", "addr", "del", route, "dev", "lo")
-	if output, err := delCmd.CombinedOutput(); err != nil {
+	if output, err := c.run("ip", "addr", "del", route, "dev", "lo"); err != nil {
 		log.Printf("Warning: failed to remove IP %s from loopback: %v\nOutput: %s", route, err, output)
 	} else {
 		log.Printf("Removed IP %s from loopback", route)
@@ -375,8 +402,7 @@ func (c *BGPServiceController) testKubernetesAPI() error {
 
 // testFRRConnectivity tests FRR CLI availability
 func (c *BGPServiceController) testFRRConnectivity() error {
-	cmd := exec.Command("vtysh", "-c", "show version")
-	_, err := cmd.Output()
+	_, err := c.run("vtysh", "-c", "show version")
 	return err
 }
 
