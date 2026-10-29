@@ -1,5 +1,4 @@
 # Default values for cosmolet
-replicaCount: 1
 
 image:
   # Defaults match `make docker-build` (Makefile DOCKER_REGISTRY/
