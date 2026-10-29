@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v2"
 )
@@ -61,11 +62,11 @@ func LoadConfig(configPath string) (*Config, error) {
 		},
 	}
 
-	// Check if config file exists
+	// Check if config file exists. Fail closed: a BGP routing daemon must not
+	// silently run on fail-open defaults (BGP enabled, ASN 0) when its config
+	// is missing or mispathed (Finding 24).
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// File doesn't exist, use defaults with warning
-		fmt.Printf("Warning: Config file %s not found, using defaults\n", configPath)
-		return config, nil
+		return nil, fmt.Errorf("config file %s not found (fail-closed; create it or point -config at a valid file)", configPath)
 	}
 
 	// Read config file
@@ -87,16 +88,31 @@ func LoadConfig(configPath string) (*Config, error) {
 	return config, nil
 }
 
+// maxLoopIntervalSeconds caps loop_interval_seconds. An unbounded value lets a
+// misconfigured daemon sleep for years between loops, wedging the control loop
+// and tripping the liveness staleness check permanently (Finding 23).
+const maxLoopIntervalSeconds = 3600
+
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
-	// Validate services configuration
+	// Validate services configuration. An empty entry ("") is the Kubernetes
+	// all-namespaces wildcard, which would silently escalate a scoped
+	// allow-list to cluster-wide discovery, so it is rejected (Finding 22).
 	if len(c.Services.Namespaces) == 0 {
 		return fmt.Errorf("at least one namespace must be specified")
+	}
+	for _, ns := range c.Services.Namespaces {
+		if strings.TrimSpace(ns) == "" {
+			return fmt.Errorf("services.namespaces must not contain empty entries (the empty string means all namespaces)")
+		}
 	}
 
 	// Validate loop interval
 	if c.LoopIntervalSeconds <= 0 {
 		return fmt.Errorf("loop_interval_seconds must be positive")
+	}
+	if c.LoopIntervalSeconds > maxLoopIntervalSeconds {
+		return fmt.Errorf("loop_interval_seconds must be at most %d (got %d)", maxLoopIntervalSeconds, c.LoopIntervalSeconds)
 	}
 
 	// Validate logging level
