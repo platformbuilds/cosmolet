@@ -286,3 +286,27 @@ Cosmolet is documented as a Kubernetes controller that advertises Kubernetes ser
 - What is wrong: `logging.format` is parsed and validated (text/json) but never applied anywhere; the logger always uses the stdlib default text format.
 - How it fails in practice: An operator sets `logging.format: json` expecting structured, machine-parseable logs (important for a DaemonSet feeding a log aggregator) and gets plain-text lines instead. The knob is dead, like the dead log level (Finding 21).
 - Fix: Left unfixed (needs a decision / larger change). A clean, minimal fix would mean either (a) adding a tiny JSON log formatter used when `format=json`, or (b) documenting that only `text` is supported and removing the `json` option. Because it interacts with Finding 21's log-level work and the stdlib `log` package has no built-in JSON formatter, it was left as a recommendation rather than a half-wired change. Recommendation: implement a minimal `log` hook that emits JSON lines when `format=json` (fields: ts, level, msg), alongside the level filter from Finding 21.
+
+### Finding 35
+- Severity: P2
+- File: pkg/controller/bgp_controller.go:273 (`net.InterfaceByName("lo")`)
+- What is wrong: `isServiceAdvertisedByFRR` hardcodes the loopback interface name `"lo"`. On Linux (the target platform for the DaemonSet) the loopback is `lo`, but on macOS/BSD it is `lo0`. The code is only correct on Linux.
+- How it fails in practice: On the target Linux DaemonSet this works. On any non-Linux host (developer laptop running the binary locally, macOS CI, a `lo0`-named loopback variant) `net.InterfaceByName("lo")` errors, so the idempotency check always reports "not on loopback" and the controller re-runs `ip addr add` + `network` every loop instead of short-circuiting on the already-advertised path. It is a portability/portability-test gap rather than a Linux-production bug; surfaced because the Phase 3 loopback-gated controller tests self-skip on macOS (`lo` absent) and only exercise the error branch.
+- Fix: Left unfixed (recommendation). Robust fix: use `net.InterfaceByName` with a fallback, or better, enumerate `net.Interfaces()` for the one flagged `FlagLoopback` (or use `net.Interfaces()` and match by `Index`/`Name` `lo`/`lo0`) so the loopback is found portably. Not implemented because it touches the controller and the team should confirm whether non-Linux local runs are a supported scenario (for a Linux-only DaemonSet the current code is correct, but the test coverage gap on macOS should be noted).
+
+## Test Coverage (Phase 3)
+
+Final result of `go test -race -count=1 -cover ./...` on `review-overnight`:
+
+| Package | Tests | Coverage | Notes |
+|---|---|---|---|
+| `cmd/cosmolet` | 0 | 0.0% | No test files (flag parsing / HTTP mux registration; thin glue). Not tested. |
+| `pkg/config` | 30 | **94.7%** | `Validate()` (ASN, namespaces, loop cap, log level/format, socket path), `LoadConfig` (happy/invalid/missing/defaults/propagation), accessors, yaml snake_case tag mapping. |
+| `pkg/controller` | 24 (4 skip) | **50.5%** | Withdraw/advertise via `fakeRunner`, family helpers, full control loop via `k8s.io/client-go/kubernetes/fake` (fetch, health check, processService, withdrawStale, context-cancel, kubeconfig fallback). 4 loopback-gated tests self-skip on macOS (`lo` vs `lo0`, see Finding 35) and run on Linux CI. |
+| `pkg/health` | 16 | **100.0%** | `NewChecker`, liveness (fresh/stale/not-live), readiness aggregation (per-check pass/fail), `CheckServiceDiscovery`, K8s/FRR status mapping, HTTP handlers via `httptest`, concurrent read/write under `-race`. |
+| `pkg/logging` | 6 | **93.1%** | Level gating / `applyLogLevel` (added with Finding 21 fix). |
+| **Total** | **76** | — | 78 test functions, 4 skip, 0 fail. All pass under `go test -race -count=1 ./...`. |
+
+Notes:
+- `cmd/cosmolet` remains at 0% because it is a thin `main` (flags + HTTP mux). The meaningful logic it calls (config, controller, health, logging) is covered. Adding tests there would require either a thin seam or accepting low value; not done in this pass.
+- The 4 skipped controller tests are purely environmental (macOS `lo` vs `lo0`). On the Linux CI runner they execute and raise controller coverage above 50.5% (the `isServiceAdvertisedByFRR` loopback branch and the advertise/withdraw-by-IP paths).

@@ -216,3 +216,13 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Skipped: none. The /healthz and /readyz routes themselves (mux registration, 8080 port) live in cmd/cosmolet/main.go (startHealthServer) and are out of scope; the handler logic behind them is fully covered here.
 - Validation: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (health: 16 tests).
 - Commit: f9f6e70 (tests + PROGRESS.md entry); hash recorded in the following commit
+
+### Task 10 — Phase 3: coverage run + coverage table + portability finding
+- Start: Thu Oct 29 05:05 PDT 2026
+- End: (filled at commit)
+- What: Ran the full `go test -race -count=1 -cover ./...` pass and added the "Test Coverage (Phase 3)" table to REVIEW.md. Also logged Finding 35 (P2) — `isServiceAdvertisedByFRR` hardcodes `net.InterfaceByName("lo")` which is correct on the Linux DaemonSet target but fails on macOS/BSD (`lo0`); surfaced by the 4 loopback-gated controller tests that self-skip on this macOS host.
+- Result:
+  - Final coverage: pkg/config 94.7% (30 tests), pkg/controller 50.5% (24 tests, 4 skip on macOS `lo` vs `lo0`), pkg/health 100.0% (16 tests), pkg/logging 93.1% (6 tests), cmd/cosmolet 0% (thin main, no tests). 78 test functions total, 76 executed, 4 skipped, 0 failed.
+  - Finding 35 (P2, lo/lo0 portability) logged with a recommendation (enumerate `net.Interfaces()` for `FlagLoopback` or fall back to `lo0`). Left unfixed — needs a decision on whether non-Linux local runs are supported.
+  - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass.
+- Commit: (filled after commit)
