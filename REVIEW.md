@@ -5,7 +5,26 @@
 
 ## Executive Summary
 
-*(written in Phase 4, step 11)*
+Cosmolet is a privileged DaemonSet that advertises Kubernetes service ClusterIPs via BGP through FRR (`vtysh`). The review covered the Go controller, config, health, and logging packages; the Helm chart; the Dockerfile; and the Makefile/build scripts. **35 findings** were logged (3 P0, 8 P1, 14 P2, 10 P3). **22 were fixed with tests in this branch** (`review-overnight`); **12 are left unfixed** with an explicit recommendation each because they need a human/architecture decision or a larger change. All changes build, vet, and pass `go test -race` (76 tests, 4 skipped on macOS, 0 failed).
+
+**The controller's documented core promise does not hold up.** The most consequential issues, in order:
+
+1. **P0 — No route withdrawal originally (Finding 1, FIXED).** The controller only ever added BGP routes; a service that became unhealthy or was deleted kept its route advertised forever → traffic blackholing. Fixed by adding `withdrawStaleRoutes`/`withdrawAllRoutes` and tracking advertised IPs.
+2. **P0 — No RBAC / ServiceAccount manifests in the chart (Finding 14, FIXED).** The DaemonSet references a ServiceAccount and `rbac.create: true`, but the chart generated no ServiceAccount/ClusterRole/ClusterRoleBinding, so the in-cluster identity was permission-less and `testKubernetesAPI` failed at startup. Chart templates added.
+3. **P0 — Docker image could not be built (Finding 20, FIXED).** The builder stage used `golang:1.21-alpine` while `go.mod` declares `go 1.27.3`; the build was a hard failure. Bumped to `golang:1.27-alpine`.
+4. **P1 — No leader election (Finding 2, NOT fixed).** Every DaemonSet pod runs the full control loop and races on `vtysh`; the README's "only one instance manages BGP routes" has no code backing. Needs a Lease-based election design decision.
+5. **P1 — No shutdown route cleanup (Finding 3, NOT fixed).** On SIGTERM the process sleeps a fixed 5 s and exits rather than waiting for `withdrawAllRoutes` to complete; slow FRR can leave stale routes.
+6. **P1 — `bgp.asn` defaulted to 0 → `router bgp 0` (Finding 8, FIXED).** Validation now rejects an ASN outside `1..4294967295` when BGP is enabled.
+7. **P1 — No IPv6 support (Finding 9, FIXED).** Prefix/address-family/show-command were hardcoded to IPv4; family-aware helpers added (`/128`, `ipv6 unicast`, `show bgp ipv6 unicast`).
+8. **P1 — No ConfigMap in the chart (Finding 13, FIXED).** The chart's camelCase values never reached the snake_case Go struct; a snake_case ConfigMap template + RBAC were added.
+9. **P1 — Documented log level is a dead knob (Finding 21, FIXED).** Both the `-log-level` flag and `logging.level` were parsed/validated but never applied; a minimal level gate was wired in.
+10. **P1 — No CI (Finding 28, FIXED).** A minimal GitHub Actions workflow (build + vet + test -race) was added; its absence is what allowed the P0s above to ship.
+
+**Recurring themes.** (a) *Config knobs that do nothing*: dead `frr.socket_path`/`config_path` (Finding 11), dead `logging.format` (Finding 34), silent fail-open on a missing config file (Finding 24, FIXED). (b) *Privileged-by-default with no hardening*: `privileged: true`, `runAsUser: 0`, `hostNetwork`/`hostPID`, no non-root `USER` in the image (documented in the Design-vs-Implementation table; the image/chart hardening is a human decision). (c) *FRR is assumed to exist*: the container never starts the FRR daemon and the chart mounts a host `/var/run/frr` hostPath — `vtysh` has no daemon to talk to in a clean deploy (documented P0, left for a human decision). (d) *Version/build inconsistency*: Makefile image ref vs chart, `git describe` with no tags, `beta` vs `v0.1.0`, `build.sh` missing commit/date (Findings 15/18/22/32/33 — mostly FIXED). (e) *The repo could not even build out of the box* (`go.mod`/`go.sum` were gitignored and never committed; restored in Task 0).
+
+**Test coverage (Phase 3).** `pkg/config` 94.7%, `pkg/health` 100%, `pkg/logging` 93.1%, `pkg/controller` 50.5% (4 loopback-gated tests skip on macOS `lo` vs `lo0` — see Finding 35 — and run on Linux CI), `cmd/cosmolet` 0% (thin `main`). 76 tests pass under `-race`.
+
+**What a human should decide next (the 12 unfixed items):** leader election + shutdown coordination (Findings 2, 3); fail-hard vs retry on `ip addr add` (Finding 4); distinguish transient API errors from deletion to avoid route flapping (Finding 5); add vtysh timeouts (Finding 6); wire or remove the dead FRR config knobs (Finding 11); persist `write memory` only on route-set change (Finding 12); add liveness/readiness probes (Finding 19); the `EXPOSE 9090` metrics-port decision (Finding 31); adopt a git release-tag scheme (Finding 32); a minimal JSON log formatter (Finding 34); and the `lo`/`lo0` loopback portability (Finding 35). The privileged/container-hardening and "who runs the FRR daemon" decisions are tracked in the Design-vs-Implementation table rather than as individual findings.
 
 ## Design as Documented
 

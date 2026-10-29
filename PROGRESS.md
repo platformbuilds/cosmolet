@@ -225,4 +225,34 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
   - Final coverage: pkg/config 94.7% (30 tests), pkg/controller 50.5% (24 tests, 4 skip on macOS `lo` vs `lo0`), pkg/health 100.0% (16 tests), pkg/logging 93.1% (6 tests), cmd/cosmolet 0% (thin main, no tests). 78 test functions total, 76 executed, 4 skipped, 0 failed.
   - Finding 35 (P2, lo/lo0 portability) logged with a recommendation (enumerate `net.Interfaces()` for `FlagLoopback` or fall back to `lo0`). Left unfixed — needs a decision on whether non-Linux local runs are supported.
   - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass.
+- Commit: 2d6b071
+
+### Task 11 — Phase 4: Executive Summary
+- Start: Thu Oct 29 05:08 PDT 2026
+- End: (filled at commit)
+- What: Wrote the "## Executive Summary" in REVIEW.md (was a placeholder). Summarizes the 35 findings (3 P0 / 8 P1 / 14 P2 / 10 P3), the 22 fixed vs 12 left-unfixed, the top-10 most consequential issues, recurring themes (dead config knobs, privileged-by-default, FRR assumed to exist, version/build inconsistency, repo unbuildable out of the box), the Phase 3 coverage table, and the explicit list of human decisions still needed.
+- Result: Executive Summary in place. `go build/vet/test -race` unchanged (docs only).
 - Commit: (filled after commit)
+
+### Task 12 — Phase 4: Running summary (this entry)
+- Start: Thu Oct 29 05:08 PDT 2026
+- End: (filled at commit)
+- What: Final wrap-up entry. The full 4-phase review is complete on branch `review-overnight` (32 commits ahead of `main`).
+
+## FINAL RUNNING SUMMARY
+
+**Phase 1 — Design (Tasks 1-2).** Documented what the README promises and cross-referenced it against the code. 12 promises: 5 "no" (LoadBalancer, ExternalIPs/NodePort, leader election, failover/HA, RBAC manifests, security hardening), 2 "partly" (namespace-scoped discovery not cluster-wide; Prometheus is a static stub), 5 "yes". Headline: the "only one instance manages BGP routes" and "proper RBAC" claims have no code/chart backing.
+
+**Phase 2 — Review (Tasks 3-6).** 35 findings logged (3 P0, 8 P1, 14 P2, 10 P3).
+- Correctness (Task 3/3b): Finding 1 P0 no route withdrawal → FIXED; Finding 2 P1 no leader election (unfixed); Finding 3 P1 no shutdown cleanup (unfixed); Finding 7 P1 advertised-marked-on-failure → FIXED (CommandRunner refactor).
+- FRR integration (Task 4): Finding 8 P1 ASN=0 → FIXED; Finding 9 P1 no IPv6 → FIXED; Finding 10 P2 fragile output parse → FIXED (`*>`); Findings 11/12 (dead FRR knobs, write-memory churn) logged unfixed.
+- Chart (Task 5): Finding 13 P1 no ConfigMap → FIXED; Finding 14 P0 no RBAC templates → FIXED; Findings 15/16/17/18 (version, placeholders, dead replicaCount, image-ref) → FIXED; Finding 19 (no probes) unfixed.
+- Config & ops (Task 6): Finding 20 P0 Docker build break → FIXED; Finding 21 P1 dead log level → FIXED; Findings 22-33 (empty-ns, loop cap, fail-closed, ioutil, .gitignore, stale binary, no CI, .dockerignore, go-mod-tidy, EXPOSE 9090, no tags, build.sh) → 10 FIXED, 3 unfixed (31/32/34).
+
+**Phase 3 — Tests (Tasks 7-10).** pkg/config 73.7%→94.7%; pkg/controller 23.8%→50.5% (fake clientset); pkg/health 0%→100%; pkg/logging 93.1%; cmd/cosmolet 0% (thin main). 76 tests pass under `-race` (4 skip on macOS `lo`/`lo0` — Finding 35). Full coverage table added to REVIEW.md.
+
+**Phase 4 — Wrap (Tasks 11-12).** Executive Summary written; running summary is this entry.
+
+**Bottom line.** The controller's core loop now converges (advertise + withdraw + shutdown), the image builds, the chart actually creates the ServiceAccount/RBAC/ConfigMap it references, the most misleading config knobs are enforced or wired, and there is CI. The remaining work is deliberate architecture: leader election + shutdown coordination, FRR-daemon ownership, container privilege hardening, and the smaller dead-knob/portability items — all logged with recommendations in REVIEW.md.
+
+**Decisions needed from a human (12 unfixed findings + documented design items):** leader election (2), shutdown coordination (3), ip-addr-add fail-hard-vs-retry (4), transient-vs-deleted health handling (5), vtysh timeout (6), dead FRR knobs (11), write-memory policy (12), liveness/readiness probes (19), metrics port 9090 (31), git release-tag scheme (32), JSON log formatter (34), lo/lo0 portability (35); plus the Design-table items: privileged/container hardening and who runs the FRR daemon.
