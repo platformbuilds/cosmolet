@@ -51,7 +51,7 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 
 ### Task 4 — Phase 2: FRR integration
 - Start: Thu Oct 29 04:27 PDT 2026
-- End: (filled at commit)
+- End: Thu Oct 29 04:44 PDT 2026
 - What: FRR-integration review (done in main session; subagent gateway was rate-limited). Verified the 8 research leads against source (file:line). Implemented two P1 fixes: (a) ASN validation in `config.Validate()` — reject `bgp.asn` outside 1..4294967295 when `bgp.enabled` (Finding 8); (b) IPv6 support via family-aware helpers `routePrefix` (/32 vs /128), `bgpAddressFamily` (ipv4/ipv6 unicast), `bgpShowCommand` (`show ip bgp` vs `show bgp ipv6 unicast`), wired into advertise/withdraw/is-advertised (Finding 9). Also hardened the `isServiceAdvertisedByFRR` output parse from the unreliable `"sourced"`+`"valid"` substring match to the FRR best-path marker `"*>"` (Finding 10). Logged two leads as findings left unfixed pending a human decision: dead `FRRConfig.SocketPath`/`ConfigPath` config (Finding 11) and `write memory` on every loop (Finding 12).
 - Result:
   - Finding 8 (P1, ASN 0/invalid): FIXED — `config.Validate()`; tests in new `pkg/config/config_test.go` (10 cases).
@@ -60,4 +60,4 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
   - Finding 11 (P2, dead FRR config knobs): LEFT UNFIXED — needs decision (wire `-s <socket>` vs remove fields).
   - Finding 12 (P2, `write memory` every loop): LEFT UNFIXED — needs decision (persist only on route-set change).
   - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (config: 10 tests, controller: 11 tests).
-- Commits: (filled after commit)
+- Commit: ce1df36
