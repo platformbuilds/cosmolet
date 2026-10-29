@@ -15,6 +15,7 @@ import (
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/controller"
 	"cosmolet/pkg/health"
+	"cosmolet/pkg/logging"
 )
 
 const (
@@ -41,18 +42,22 @@ func main() {
 		return
 	}
 
-	log.Printf("Starting Cosmolet BGP Service Controller")
-	log.Printf("Version: %s, Commit: %s, Build Date: %s", Version, GitCommit, BuildDate)
-
-	// Load configuration
+	// Load configuration first so the config's log level can be applied
+	// before any logging happens. The -log-level flag wins over the config
+	// value when it has been explicitly set.
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	log.Printf("Configuration loaded from: %s", *configPath)
-	log.Printf("Monitoring namespaces: %v", cfg.Services.Namespaces)
-	log.Printf("Loop interval: %d seconds", cfg.LoopIntervalSeconds)
+	applyLogLevel(cfg, *logLevel != defaultLogLevel)
+
+	logging.Info("Starting Cosmolet BGP Service Controller")
+	logging.Info("Version: %s, Commit: %s, Build Date: %s", Version, GitCommit, BuildDate)
+
+	logging.Info("Configuration loaded from: %s", *configPath)
+	logging.Info("Monitoring namespaces: %v", cfg.Services.Namespaces)
+	logging.Info("Loop interval: %d seconds", cfg.LoopIntervalSeconds)
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,7 +76,7 @@ func main() {
 	// Start controller in goroutine
 	go func() {
 		if err := bgpController.Start(); err != nil {
-			log.Printf("BGP controller error: %v", err)
+			logging.Error("BGP controller error: %v", err)
 			cancel()
 		}
 	}()
@@ -82,7 +87,21 @@ func main() {
 	// Wait for shutdown signal
 	waitForShutdown(cancel)
 
-	log.Println("Shutting down Cosmolet BGP Service Controller")
+	logging.Info("Shutting down Cosmolet BGP Service Controller")
+}
+
+// applyLogLevel sets the active log level. The -log-level flag wins when it
+// was explicitly set; otherwise the config's logging.level is used. Both the
+// flag and the config field are documented knobs, so they must take effect.
+func applyLogLevel(cfg *config.Config, flagSet bool) {
+	level := cfg.Logging.Level
+	if flagSet {
+		level = *logLevel
+	}
+	if level == "" {
+		level = defaultLogLevel
+	}
+	logging.SetLevel(level)
 }
 
 func printVersion() {
@@ -108,9 +127,9 @@ func startHealthServer(checker *health.Checker) {
 		Handler: mux,
 	}
 
-	log.Println("Starting health check server on :8080")
+	logging.Info("Starting health check server on :8080")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("Health server error: %v", err)
+		logging.Error("Health server error: %v", err)
 	}
 }
 
@@ -137,7 +156,7 @@ func waitForShutdown(cancel context.CancelFunc) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigChan
-	log.Printf("Received signal: %s", sig)
+	logging.Info("Received signal: %s", sig)
 
 	// Give some time for graceful shutdown
 	cancel()
