@@ -191,3 +191,28 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Result: 12 new test functions. Coverage pkg/controller 23.8% → 50.5% (per-function: performHealthCheck 100%, withdrawStaleRoutes 100%, withdrawAllRoutes 100%, fetchServicesFromNamespaces 90%, runControlLoop 68.2%, advertiseServiceViaBGP 75%, withdrawServiceViaBGP 70%; isServiceAdvertisedByFRR 0% here only because "lo" is absent on macOS — it runs on Linux).
 - Validation: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (controller: 24 tests total, 4 skipped on this host).
 - Commit: 3f9ace11d6a3cf81388b0887f73fc8243935499f (tests commit); PROGRESS.md hash metadata recorded in the following commit
+
+### Task 9 — Phase 3: pkg/health tests
+- Start: Thu Oct 29 05:04 PDT 2026
+- End: Thu Oct 29 05:05:30 PDT 2026
+- What: Created `pkg/health/checker_test.go` covering the full public surface of `Checker` in `pkg/health/checker.go`. No non-test code changed. Time-dependent paths (liveness staleness) are made deterministic by setting `lastLoop` directly to `now - 5m - 1m` instead of sleeping. The liveness/readiness HTTP handlers live in pkg/health (cmd/cosmolet/main.go only wires the mux routes), so they are tested here via httptest.
+- New tests (16):
+  - TestNewCheckerInitialState: NewChecker non-nil; ready=false, live=true, lastLoop zero, uptime ~0.
+  - TestSetReady / TestSetLive: toggles IsReady/IsLive both ways.
+  - TestUpdateLastLoopSetsFreshTime: UpdateLastLoop refreshes GetLastLoop to ~now (fresh, within 1m).
+  - TestLivenessHandler_HealthyWhenLoopRecent: fresh lastLoop → 200 {"status":"ok"}.
+  - TestLivenessHandler_StaleWhenLoopOld: lastLoop = now-6m → 503 {"status":"stale"} (staleness threshold).
+  - TestLivenessHandler_UnhealthyWhenNotLive: SetLive(false) → 503 {"status":"unhealthy"}.
+  - TestLivenessHandler_ZeroLastLoopNotStale: zero lastLoop is NOT stale (pins current contract: only !live and elapsed>5m are unhealthy).
+  - TestReadinessHandler_AllChecksPass: SetReady(true) + k8s/frr/service-discovery all pass → 200 {"status":"ready"} with all 3 checks "pass" present.
+  - TestReadinessHandler_NotReadyWhenFlagFalse: ready flag false → 503 {"status":"not_ready"}.
+  - TestReadinessHandler_UnhealthyWhenCheckFails: one failing sub-check (frr_status fail) → 503 {"status":"unhealthy"} with the failing check + message named in the response.
+  - TestAddCheckAndRemoveCheck: AddCheck populates a check (name/status/message) visible in /readyz; RemoveCheck deletes it.
+  - TestAddCheckWithDuration: duration string ("250ms") round-trips in the response.
+  - TestCheckServiceDiscoveryUpdatesReadiness: CheckServiceDiscovery(42, ...) → service_discovery "pass" with "Discovered 42 services", /readyz stays ready.
+  - TestCheckKubernetesAPIAndFRRStatus: false/true args → kubernetes_api "fail" + frr_status "pass", /readyz unhealthy, messages preserved.
+  - TestCheckerConcurrentReadWrite: 8 writer goroutines (UpdateLastLoop/SetReady/SetLive/AddCheck/CheckServiceDiscovery/RemoveCheck + getters) racing 4 reader goroutines calling LivenessHandler/ReadinessHandler; passes under `go test -race` (proves the sync.RWMutex guards have no data race).
+- Result: 16 new test functions. Coverage pkg/health 0.0% → 100.0%.
+- Skipped: none. The /healthz and /readyz routes themselves (mux registration, 8080 port) live in cmd/cosmolet/main.go (startHealthServer) and are out of scope; the handler logic behind them is fully covered here.
+- Validation: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (health: 16 tests).
+- Commit: 7625d6b (amended after updating this entry with the final hash)
