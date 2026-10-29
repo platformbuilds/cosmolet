@@ -61,3 +61,34 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
   - Finding 12 (P2, `write memory` every loop): LEFT UNFIXED — needs decision (persist only on route-set change).
   - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (config: 10 tests, controller: 11 tests).
 - Commit: ce1df36
+
+### Task 5 — Phase 2: Kubernetes chart
+- Start: Thu Oct 29 04:44:26 PDT 2026
+- End: Thu Oct 29 04:47:09 PDT 2026
+- What: Chart-focused review + fixes. Verified all 7 research leads against `charts/cosmolet/` (Chart.yaml, values.yaml, templates/{daemonset.yaml,_helpers.tpl}, configmap.yaml absent, rbac.yaml absent), Makefile, Dockerfile, and the Go config schema (`pkg/config/config.go`, `cmd/cosmolet/main.go`). Appended 7 new findings (13-19) to REVIEW.md, then implemented 5 safe high-value chart fixes (one commit each). No Go code, Dockerfile, or Makefile build-logic changes.
+- Leads verified (all confirmed):
+  - camelCase values vs snake_case Go tags + no ConfigMap template (P1) — values.yaml:14,17 vs config.go:15,34; configmap.yaml absent.
+  - version source-of-truth mismatch (P3) — Chart.yaml:5-6 (0.1.0/v0.1.0) vs Makefile:7 (git describe, no tags) vs Dockerfile:16 (ARG VERSION=beta).
+  - Chart.yaml placeholder maintainer/home/sources (P3) — Chart.yaml:13-19.
+  - dead replicaCount (P3) — values.yaml:2, never referenced in daemonset.yaml.
+  - image ref mismatch (P2) — values.yaml:5 (platformbuilds/cosmolet) vs Makefile:5-6 (docker.io/cosmolet/cosmolet).
+  - no liveness/readiness probes (P3) — daemonset.yaml (none), Dockerfile:45-46 HEALTHCHECK ignored by k8s.
+  - RBAC overlap (P0) — daemonset.yaml:15 serviceAccountName + values.yaml:39-40 rbac.create, no rbac template (already in "Design vs implementation" table).
+- Findings added (13-19) and disposition:
+  - Finding 13 (P1, no ConfigMap template / camelCase-vs-snake_case config): FIXED — commit 0767959. Added templates/configmap.yaml rendering /etc/cosmolet/config.yaml in snake_case (services.namespaces, loop_interval_seconds, bgp.enabled, bgp.asn, logging.level/format, frr.socket_path) + config block in values.yaml. Proven by round-tripping the rendered config through pkg/config Config + Validate().
+  - Finding 14 (P0 overlap, no RBAC): FIXED — commit 50ca131. Added templates/rbac.yaml (ServiceAccount gated on serviceAccount.create; ClusterRole + ClusterRoleBinding for get/list/watch on services+endpoints gated on rbac.create).
+  - Finding 15 (P3, version source of truth): FIXED — commit 70db0fe. image.tag now defaults to empty -> daemonset falls back to .Chart.AppVersion; added overridable image.registry (docker.io). Makefile git-describe left for build tagging (human to pick canonical tagging).
+  - Finding 16 (P3, Chart.yaml placeholders): FIXED — commit 70db0fe. home/sources -> https://github.com/platformbuilds/cosmolet; maintainer -> Shiva Kumar RV <rv@platformbuilds.org> (from maintainers.md).
+  - Finding 17 (P3, dead replicaCount): FIXED — commit f0406af. Removed from values.yaml.
+  - Finding 18 (P2, image ref mismatch): FIXED — commit 70db0fe. image.repository -> cosmolet/cosmolet (+ image.registry docker.io) so chart default == make docker-build output.
+  - Finding 19 (P3, no liveness/readiness probes): LEFT UNFIXED (needs a decision). Probes depend on the FRR-in-pod-vs-host and hostNetwork:8080 model; recommendation logged (add httpGet /healthz + /readyz at :8080 once settled).
+- Validation:
+  - `helm lint charts/cosmolet`: 1 chart linted, 0 failed (only INFO: icon recommended).
+  - `helm template cosmolet charts/cosmolet`: 5 well-formed docs (ServiceAccount, ConfigMap, ClusterRole, ClusterRoleBinding, DaemonSet), confirmed by ruby YAML.load_stream. Default image renders `docker.io/cosmolet/cosmolet:v0.1.0` (from appVersion); tag/registry/repo overrides resolve correctly.
+  - ConfigMap round-trip: rendered config.yaml parses into pkg/config Config and passes Validate().
+  - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`: all pass (config + controller packages ok).
+- Commits:
+  - 0767959cb437a038a1a677285f9b356da29c7f4f chart: add ConfigMap template rendering snake_case config (P1)
+  - 50ca13185ffcc7cd62268d933301d4634b9719c2 chart: add RBAC templates (ServiceAccount, ClusterRole, ClusterRoleBinding) (P0)
+  - 70db0fe183f2286553d3676a26c5d810a73e8a7f chart: single source of truth for image version; fix repo/registry mismatch; clean placeholders
+  - f0406af5603bbbb67914b4510827d3350596e63d chart: remove dead replicaCount value (P3)
