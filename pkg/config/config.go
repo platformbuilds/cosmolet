@@ -38,7 +38,6 @@ type LoggingConfig struct {
 // FRRConfig contains FRR-specific configuration
 type FRRConfig struct {
 	SocketPath string `yaml:"socket_path"`
-	ConfigPath string `yaml:"config_path,omitempty"`
 }
 
 // LoadConfig loads configuration from the specified file path
@@ -185,7 +184,3 @@ func (c *Config) GetVtyshSocketArgs() []string {
 	return []string{"-s", c.FRR.SocketPath}
 }
 
-// GetFRRConfigPath returns the FRR config path
-func (c *Config) GetFRRConfigPath() string {
-	return c.FRR.ConfigPath
-}

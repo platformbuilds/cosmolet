@@ -20,12 +20,14 @@ import (
 const (
 	defaultConfigPath = "/etc/cosmolet/config.yaml"
 	defaultLogLevel   = "info"
+	defaultLogFormat  = "text"
 )
 
 var (
-	configPath = flag.String("config", defaultConfigPath, "Path to configuration file")
-	logLevel   = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
-	version    = flag.Bool("version", false, "Print version information")
+	configPath  = flag.String("config", defaultConfigPath, "Path to configuration file")
+	logLevel    = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
+	logFormat   = flag.String("log-format", defaultLogFormat, "Log format (text, json)")
+	version     = flag.Bool("version", false, "Print version information")
 
 	// Build information (set via ldflags)
 	Version   = "dev"
@@ -50,6 +52,7 @@ func main() {
 	}
 
 	applyLogLevel(cfg, *logLevel != defaultLogLevel)
+	applyLogFormat(cfg, *logFormat != defaultLogFormat)
 
 	logging.Info("Starting Cosmolet BGP Service Controller")
 	logging.Info("Version: %s, Commit: %s, Build Date: %s", Version, GitCommit, BuildDate)
@@ -109,6 +112,21 @@ func applyLogLevel(cfg *config.Config, flagSet bool) {
 		level = defaultLogLevel
 	}
 	logging.SetLevel(level)
+}
+
+// applyLogFormat sets the active log format (text or json). The -log-format
+// flag wins when it was explicitly set; otherwise the config's
+// logging.format is used. Both are documented knobs and must take effect
+// (Finding 34).
+func applyLogFormat(cfg *config.Config, flagSet bool) {
+	format := cfg.Logging.Format
+	if flagSet {
+		format = *logFormat
+	}
+	if format == "" {
+		format = defaultLogFormat
+	}
+	logging.SetFormat(format)
 }
 
 func printVersion() {

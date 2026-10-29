@@ -18,6 +18,7 @@ import (
 	"cosmolet/pkg/logging"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
@@ -259,22 +260,33 @@ func (c *BGPServiceController) runControlLoop() {
 	log.Printf("Found %d services to process", len(services))
 	c.healthChecker.CheckServiceDiscovery(len(services), time.Since(start))
 
-	// Step 2: Process each service and track which are currently healthy
-	healthyIPs := make(map[string]bool)
+	// Step 2: Process each service. An advertised route is preserved if it is
+	// (a) confirmed healthy this iteration, or (b) its health check hit a
+	// transient API error — tracked here so a single API blip cannot flap an
+	// already-healthy route (Finding 5). Routes that are neither (unhealthy,
+	// deleted, or no longer present as a service) are withdrawn.
+	confirmedIPs := make(map[string]bool)
+	keepIPs := make(map[string]bool)
 	for _, service := range services {
 		select {
 		case <-c.ctx.Done():
 			return
 		default:
-			isHealthy := c.processService(service)
-			if isHealthy {
-				healthyIPs[service.Spec.ClusterIP] = true
+			switch c.processService(service) {
+			case outcomeAdvertise:
+				confirmedIPs[service.Spec.ClusterIP] = true
+			case outcomeWithdraw:
+				// unhealthy/deleted: not confirmed, not kept → withdrawn
+			case outcomeKeep:
+				// transient API error: leave the route exactly as it is
+				keepIPs[service.Spec.ClusterIP] = true
 			}
 		}
 	}
 
-	// Step 3: Withdraw routes for services no longer healthy or deleted
-	c.withdrawStaleRoutes(healthyIPs)
+	// Step 3: Withdraw routes that are advertised but neither confirmed healthy
+	// nor protected by a transient error (Finding 5).
+	c.withdrawStaleRoutes(confirmedIPs, keepIPs)
 
 	// Step 4: Persist FRR state once per iteration, and only when the
 	// advertised route set changed, so we do not rewrite frr.conf on every
@@ -349,22 +361,41 @@ func (c *BGPServiceController) fetchServicesFromNamespaces() ([]v1.Service, erro
 }
 
 // processService handles health and BGP advertisement for one service.
-// Returns true if the service is healthy (regardless of whether advertisement succeeded).
-func (c *BGPServiceController) processService(service v1.Service) bool {
+// It returns three-way so the control loop can distinguish "advertise/keep"
+// (healthy), "withdraw" (unhealthy/deleted), and "don't touch" (transient API
+// error — keeps the route up to avoid flapping, Finding 5).
+type processOutcome int
+
+const (
+	outcomeAdvertise processOutcome = iota // healthy: add to healthyIPs
+	outcomeWithdraw                         // unhealthy or deleted: withdraw if advertised
+	outcomeKeep                             // transient error: leave advertised state unchanged
+)
+
+// processService handles health and BGP advertisement for one service.
+func (c *BGPServiceController) processService(service v1.Service) processOutcome {
 	serviceKey := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 	clusterIP := service.Spec.ClusterIP
 
 	log.Printf("Processing service: %s (ClusterIP: %s)", serviceKey, clusterIP)
 
-	isHealthy, err := c.performHealthCheck(service)
-	if err != nil {
-		log.Printf("Error performing health check for service %s: %v", serviceKey, err)
-		return false
+	hc := c.performHealthCheck(service)
+	// A transient API error: keep whatever state the route is in (advertised
+	// routes stay advertised, un-advertised ones stay un-advertised). This
+	// prevents a single API blip from withdrawing a healthy route (Finding 5).
+	if hc.errored {
+		return outcomeKeep
 	}
-	// Decision: Service ClusterIP is healthy?
-	if !isHealthy {
-		log.Printf("Service %s marked unhealthy — skipping", serviceKey)
-		return false
+	// Decision: service deleted or marked unhealthy?
+	if hc.notFound || !hc.healthy {
+		log.Printf("Service %s %s — withdrawing", serviceKey,
+			func() string {
+				if hc.notFound {
+					return "deleted"
+				}
+				return "unhealthy"
+			}())
+		return outcomeWithdraw
 	}
 
 	log.Printf("Service %s is healthy", serviceKey)
@@ -373,7 +404,8 @@ func (c *BGPServiceController) processService(service v1.Service) bool {
 	isAdvertised, err := c.isServiceAdvertisedByFRR(clusterIP)
 	if err != nil {
 		log.Printf("Error checking BGP advertisement status for service %s: %v", serviceKey, err)
-		return true
+		// Can't tell whether it's advertised; leave state unchanged (keep).
+		return outcomeKeep
 	}
 	// Decision: Service ClusterIP is already advertised?
 	if isAdvertised {
@@ -381,7 +413,7 @@ func (c *BGPServiceController) processService(service v1.Service) bool {
 		c.mu.Lock()
 		c.advertised[clusterIP] = true
 		c.mu.Unlock()
-		return true
+		return outcomeAdvertise
 	}
 
 	// Advertise the Service ClusterIP using FRR. Only mark as advertised on
@@ -389,22 +421,42 @@ func (c *BGPServiceController) processService(service v1.Service) bool {
 	log.Printf("Advertising service %s (ClusterIP: %s) via BGP", serviceKey, clusterIP)
 	if err := c.advertiseServiceViaBGP(clusterIP); err != nil {
 		log.Printf("Error advertising service %s via BGP: %v", serviceKey, err)
-		return true
+		return outcomeKeep
 	}
 	c.mu.Lock()
 	c.advertised[clusterIP] = true
 	c.mu.Unlock()
 	log.Printf("Successfully advertised service %s", serviceKey)
-	return true
+	return outcomeAdvertise
 }
 
-// performHealthCheck checks if service has at least one ready endpoint
-func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, error) {
+// healthResult distinguishes a definitive health outcome from a transient API
+// error so the control loop can avoid route flapping during API-server
+// instability (Finding 5).
+type healthResult struct {
+	healthy     bool // meaningful only when errored == false
+	errored     bool // transient API error: don't change the advertised state
+	notFound    bool // service/endpoints gone: withdraw the route
+}
+
+// performHealthCheck checks if service has at least one ready endpoint. It
+// returns a healthResult rather than a bool+error so the caller can tell a
+// "service was deleted" outcome (withdraw) apart from a transient API error
+// (retry next loop without withdrawing) (Finding 5).
+func (c *BGPServiceController) performHealthCheck(service v1.Service) healthResult {
 	serviceKey := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 
 	endpoints, err := c.client.CoreV1().Endpoints(service.Namespace).Get(c.ctx, service.Name, metav1.GetOptions{})
 	if err != nil {
-		return false, fmt.Errorf("failed to get endpoints for service %s: %v", serviceKey, err)
+		if apierrors.IsNotFound(err) {
+			// Endpoints object is gone → the service was deleted. Withdraw.
+			log.Printf("Health check for service %s: endpoints not found (service deleted)", serviceKey)
+			return healthResult{notFound: true}
+		}
+		// Transient API error (timeout, 500, connection reset): do NOT treat
+		// the service as unhealthy, or a single blip would flap the route.
+		log.Printf("Health check for service %s: transient error, keeping current state: %v", serviceKey, err)
+		return healthResult{errored: true}
 	}
 
 	readyEndpoints := 0
@@ -415,7 +467,7 @@ func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, err
 	isHealthy := readyEndpoints > 0
 	log.Printf("Health check for service %s: %d ready endpoints, healthy: %t", serviceKey, readyEndpoints, isHealthy)
 
-	return isHealthy, nil
+	return healthResult{healthy: isHealthy}
 }
 
 // routePrefix returns the host route for a cluster IP, with a prefix length
@@ -586,12 +638,16 @@ func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
 	}
 }
 
-// withdrawStaleRoutes withdraws BGP routes for IPs that are no longer in the healthy set
-func (c *BGPServiceController) withdrawStaleRoutes(healthyIPs map[string]bool) {
+// withdrawStaleRoutes withdraws BGP routes for advertised IPs that are neither
+// confirmed healthy this iteration (confirmedIPs) nor protected by a transient
+// API error (keepIPs). This is what prevents route flapping during
+// API-server instability: a route whose health check errored transiently stays
+// up until it is either confirmed healthy or genuinely gone (Finding 5).
+func (c *BGPServiceController) withdrawStaleRoutes(confirmedIPs, keepIPs map[string]bool) {
 	c.mu.Lock()
 	var toWithdraw []string
 	for ip := range c.advertised {
-		if !healthyIPs[ip] {
+		if !confirmedIPs[ip] && !keepIPs[ip] {
 			toWithdraw = append(toWithdraw, ip)
 		}
 	}

@@ -90,3 +90,59 @@ func TestIsKnownLevel(t *testing.T) {
 		t.Fatal("expected trace to be unknown")
 	}
 }
+
+// Finding 34: SetFormat("json") must emit JSON lines, not plain text.
+func TestSetFormatJSONEmitsJSONLines(t *testing.T) {
+	var jsonBuf bytes.Buffer
+	SetLevel("info")
+	SetFormat("json")
+	SetJSONOutput(&jsonBuf)
+	defer SetFormat("text") // restore for other tests
+
+	Info("hello %d", 42)
+	got := jsonBuf.String()
+	if !strings.Contains(got, `"level":"info"`) {
+		t.Fatalf("expected a JSON line with level=info, got %q", got)
+	}
+	if !strings.Contains(got, `"msg":"hello 42"`) {
+		t.Fatalf("expected msg field to be formatted, got %q", got)
+	}
+	if !strings.Contains(got, `"ts":"`) {
+		t.Fatalf("expected a ts (timestamp) field, got %q", got)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(got), "{") {
+		t.Fatalf("expected the line to start with '{' (JSON object), got %q", got)
+	}
+}
+
+func TestSetFormatTextStaysPlainText(t *testing.T) {
+	var buf bytes.Buffer
+	SetLevel("info")
+	SetFormat("text")
+	SetOutput(&buf)
+
+	Info("plain message")
+	got := buf.String()
+	if !strings.Contains(got, "plain message") {
+		t.Fatalf("expected plain text output, got %q", got)
+	}
+	if strings.Contains(got, `"msg"`) {
+		t.Fatalf("text format must not emit JSON, got %q", got)
+	}
+}
+
+func TestUnknownFormatFallsBackToText(t *testing.T) {
+	SetFormat("bogus")
+	if got := CurrentFormat(); got != "text" {
+		t.Fatalf("expected fallback to text, got %q", got)
+	}
+}
+
+func TestIsKnownFormat(t *testing.T) {
+	if !IsKnownFormat("text") || !IsKnownFormat("json") {
+		t.Fatal("expected text and json to be known formats")
+	}
+	if IsKnownFormat("xml") {
+		t.Fatal("expected xml to be unknown")
+	}
+}

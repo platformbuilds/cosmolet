@@ -59,3 +59,24 @@ securityContext:
 daemonset:
   hostNetwork: true
   hostPID: true
+
+# Finding 19: in-pod probes. The binary serves /healthz (liveness) and
+# /readyz (readiness) on :8080 (cmd/cosmolet/main.go). With hostNetwork: true
+# these hit the node's host address. Set a probe block to {} to disable it.
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /readyz
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3

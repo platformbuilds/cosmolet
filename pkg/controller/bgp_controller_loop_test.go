@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // newFakeController builds a controller backed by the k8s fake clientset so the
@@ -191,11 +193,11 @@ func TestPerformHealthCheck_ReadyEndpointsHealthy(t *testing.T) {
 		eps("ns", "web", "1.2.3.4", "5.6.7.8"),
 	)
 
-	healthy, err := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
-	if err != nil {
-		t.Fatalf("performHealthCheck() error: %v", err)
+	hc := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
+	if hc.errored || hc.notFound {
+		t.Fatalf("expected a definitive healthy result, got %+v", hc)
 	}
-	if !healthy {
+	if !hc.healthy {
 		t.Error("expected healthy=true with ready endpoints, got false")
 	}
 }
@@ -207,32 +209,33 @@ func TestPerformHealthCheck_NoReadyEndpointsUnhealthy(t *testing.T) {
 		eps("ns", "web"), // empty subset, no ready addresses
 	)
 
-	healthy, err := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
-	if err != nil {
-		t.Fatalf("performHealthCheck() error: %v", err)
+	hc := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
+	if hc.errored || hc.notFound {
+		t.Fatalf("expected a definitive unhealthy result, got %+v", hc)
 	}
-	if healthy {
+	if hc.healthy {
 		t.Error("expected healthy=false with no ready endpoints, got true")
 	}
 }
 
-func TestPerformHealthCheck_MissingEndpointsError(t *testing.T) {
+func TestPerformHealthCheck_MissingEndpointsIsNotFound(t *testing.T) {
 	fr := &fakeRunner{}
-	// Service exists but no Endpoints object -> Get returns not found -> error.
+	// Service exists but no Endpoints object -> Get returns not found -> the
+	// service is treated as deleted (not a transient error) (Finding 5).
 	c := newFakeController(t, fr.run, context.Background(),
 		svc("ns", "web", "10.0.0.1"),
 	)
 
-	healthy, err := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
-	if err == nil {
-		t.Fatal("expected an error when endpoints are missing")
+	hc := c.performHealthCheck(*svc("ns", "web", "10.0.0.1"))
+	if !hc.notFound {
+		t.Errorf("expected notFound=true for missing endpoints, got %+v", hc)
 	}
-	if healthy {
-		t.Error("expected healthy=false on error, got true")
+	if hc.errored {
+		t.Errorf("a 404 must not be classified as a transient error, got %+v", hc)
 	}
 }
 
-func TestProcessService_UnhealthySkipsAdvertise(t *testing.T) {
+func TestProcessService_UnhealthyWithdraws(t *testing.T) {
 	fr := &fakeRunner{}
 	ip := pickTestIP(t)
 	c := newFakeController(t, fr.run, context.Background(),
@@ -240,11 +243,10 @@ func TestProcessService_UnhealthySkipsAdvertise(t *testing.T) {
 		eps("ns", "web"), // no ready endpoints -> unhealthy
 	)
 
-	healthy := c.processService(*svc("ns", "web", ip))
-	if healthy {
-		t.Error("expected processService to return false for an unhealthy service")
+	if got := c.processService(*svc("ns", "web", ip)); got != outcomeWithdraw {
+		t.Errorf("expected outcomeWithdraw for an unhealthy service, got %v", got)
 	}
-	// processService returns false at the health-check step, BEFORE the
+	// processService returns at the health-check step, BEFORE the
 	// isServiceAdvertisedByFRR / loopback probe is ever reached, so this holds
 	// on both lo and no-lo environments.
 	if len(fr.calls) != 0 {
@@ -264,9 +266,8 @@ func TestProcessService_HealthyAdvertises(t *testing.T) {
 		eps("ns", "web", "1.2.3.4"),
 	)
 
-	healthy := c.processService(*svc("ns", "web", ip))
-	if !healthy {
-		t.Error("expected processService to return true for a healthy service")
+	if got := c.processService(*svc("ns", "web", ip)); got != outcomeAdvertise {
+		t.Errorf("expected outcomeAdvertise for a healthy service, got %v", got)
 	}
 	if !fr.hasCall("ip addr add "+ip+"/32 dev lo") {
 		t.Errorf("expected 'ip addr add %s/32', got %v", ip, fr.calls)
@@ -274,8 +275,10 @@ func TestProcessService_HealthyAdvertises(t *testing.T) {
 	if !fr.hasCall("network "+ip+"/32") {
 		t.Errorf("expected 'network %s/32', got %v", ip, fr.calls)
 	}
-	if !fr.hasCall("write memory") {
-		t.Errorf("expected 'write memory', got %v", fr.calls)
+	// Persistence is done once per loop by persistFRRConfig, not per processService
+	// call (Finding 12), so a single advertise must not rewrite frr.conf.
+	if fr.hasCall("write memory") {
+		t.Errorf("processService must not run 'write memory' per call (Finding 12), got %v", fr.calls)
 	}
 	if _, ok := c.advertised[ip]; !ok {
 		t.Errorf("expected %s to be marked advertised", ip)
@@ -295,9 +298,11 @@ func TestProcessService_HealthyButAdvertiseFailsNotMarked(t *testing.T) {
 		eps("ns", "web", "1.2.3.4"),
 	)
 
-	healthy := c.processService(*svc("ns", "web", ip))
-	if !healthy {
-		t.Error("expected processService to return true (healthy) even when advertise fails")
+	// A failed advertise is not "healthy/withdraw" — it's a keep (leave the
+	// route state unchanged, retry next loop) and must not mark the IP
+	// advertised (so the next loop retries).
+	if got := c.processService(*svc("ns", "web", ip)); got != outcomeKeep {
+		t.Errorf("expected outcomeKeep when advertise fails, got %v", got)
 	}
 	if _, ok := c.advertised[ip]; ok {
 		t.Errorf("advertised map must not contain %s after a failed advertise", ip)
@@ -327,9 +332,8 @@ func TestProcessService_AlreadyAdvertisedOnLoopback(t *testing.T) {
 		eps("ns", "web", "1.2.3.4"),
 	)
 
-	healthy := c.processService(*svc("ns", "web", ip))
-	if !healthy {
-		t.Error("expected processService to return true for an already-advertised healthy service")
+	if got := c.processService(*svc("ns", "web", ip)); got != outcomeAdvertise {
+		t.Errorf("expected outcomeAdvertise for an already-advertised healthy service, got %v", got)
 	}
 	if _, ok := c.advertised[ip]; !ok {
 		t.Errorf("expected %s to be in the advertised map", ip)
@@ -403,6 +407,139 @@ func TestRunControlLoop_WithdrawsUnhealthy(t *testing.T) {
 	}
 	if fr2.hasCall("no network "+ipA+"/32") {
 		t.Errorf("must not withdraw the still-healthy %s, got %v", ipA, fr2.calls)
+	}
+}
+
+// finding5Runner records FRR commands (finding 12/13 style) and additionally
+// reports "*> " for show-bgp lookups, so the loopback-gated advertise path in
+// processService short-circuits on isServiceAdvertisedByFRR and we can assert
+// what the loop itself withdrew.
+type finding5Runner struct {
+	fr *fakeRunner
+}
+
+func (f *finding5Runner) run(name string, args ...string) ([]byte, error) {
+	out, err := f.fr.run(name, args...)
+	if name == "vtysh" && strings.Contains(f.fr.lastCall(), "show ip bgp") {
+		return []byte("*> 10.99.99.0/32 0.0.0.0 0 0 ?"), nil
+	}
+	return out, err
+}
+
+// Finding 5 end-to-end: a transient API error on one loop must NOT withdraw a
+// route that was advertised the previous loop (no flapping), while a service
+// that goes unhealthy still gets withdrawn.
+func TestRunControlLoop_TransientErrorDoesNotFlap(t *testing.T) {
+	skipUnlessLo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ipA := pickTestIP(t)
+	ipB := ipBOther(t, ipA)
+
+	// Loop 1: both healthy -> both advertised.
+	fr1 := &fakeRunner{}
+	c := newFakeController(t, fr1.run, ctx,
+		svc("ns", "web", ipA),
+		eps("ns", "web", "1.1.1.1"),
+		svc("ns", "api", ipB),
+		eps("ns", "api", "2.2.2.2"),
+	)
+	c.runControlLoop()
+	if !c.advertised[ipA] || !c.advertised[ipB] {
+		t.Fatalf("expected both advertised after loop 1, got %v", c.advertised)
+	}
+
+	// Loop 2: web's endpoints Get returns a transient error (keep), api goes
+	// unhealthy (withdraw). web's route must survive the API blip; api's goes.
+	fr2 := &fakeRunner{}
+	f5 := &finding5Runner{fr: fr2}
+	objs2 := []runtime.Object{
+		svc("ns", "web", ipA),
+		svc("ns", "api", ipB),
+		eps("ns", "api"), // api now empty -> unhealthy
+	}
+	client2 := fake.NewSimpleClientset(objs2...)
+	client2.PrependReactor("get", "endpoints", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if a, ok := action.(k8stesting.GetAction); ok && a.GetName() == "web" {
+			return true, nil, errors.New("connection reset by peer (transiant)")
+		}
+		return false, nil, nil
+	})
+	c2 := newControllerForTest(client2, &config.Config{
+		Services:            config.ServicesConfig{Namespaces: []string{"ns"}},
+		LoopIntervalSeconds: 1,
+		BGP:                 config.BGPConfig{Enabled: true, ASN: 65000},
+	}, ctx, f5.run)
+	// Carry the advertised state over from loop 1 to model convergence.
+	c2.advertised = c.advertised
+	c2.runControlLoop()
+
+	if !c2.advertised[ipA] {
+		t.Errorf("expected %s (transient API error) to REMAIN advertised, got %v", ipA, c2.advertised)
+	}
+	if _, ok := c2.advertised[ipB]; ok {
+		t.Errorf("expected %s (now unhealthy) to be removed from advertised, got %v", ipB, c2.advertised)
+	}
+	if fr2.hasCall("no network " + ipA + "/32") {
+		t.Errorf("must NOT withdraw the route hit by a transient API error, got: %v", fr2.calls)
+	}
+	if !fr2.hasCall("no network " + ipB + "/32") {
+		t.Errorf("expected withdrawal of the unhealthy %s, got: %v", ipB, fr2.calls)
+	}
+}
+
+// Finding 5 (platform-independent): a service whose endpoints Get returns a
+// transient API error is in NEITHER the confirmed nor the withdrawn set, so an
+// already-advertised route must be preserved across the loop instead of
+// flapping. This test seeds the advertised map directly so it does not depend
+// on the loopback probe and runs on macOS as well as Linux.
+func TestRunControlLoop_TransientAPIErrorPreservesRoute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ipA := "10.0.0.50" // transient-error service (previously advertised)
+	ipB := "10.0.0.51" // genuinely stale (no service, no endpoints)
+
+	objs := []runtime.Object{
+		svc("ns", "web", ipA),
+		// no Endpoints object for "web" in the clientset is not enough — we need
+		// a transient error (not a 404), so the service object is present but
+		// its endpoints Get is forced to fail transiently.
+	}
+	client := fake.NewSimpleClientset(objs...)
+	client.PrependReactor("get", "endpoints", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if a, ok := action.(k8stesting.GetAction); ok && a.GetName() == "web" {
+			return true, nil, errors.New("connection reset by peer (transient)")
+		}
+		return false, nil, nil
+	})
+
+	fr := &fakeRunner{}
+	c := newControllerForTest(client, &config.Config{
+		Services:            config.ServicesConfig{Namespaces: []string{"ns"}},
+		LoopIntervalSeconds: 1,
+		BGP:                 config.BGPConfig{Enabled: true, ASN: 65000},
+	}, ctx, fr.run)
+	// ipA was advertised in a previous iteration; ipB is leftover/stale.
+	c.advertised = map[string]bool{ipA: true, ipB: true}
+
+	c.runControlLoop()
+
+	// ipA's health check hit a transient error → kept, must stay advertised.
+	if !c.advertised[ipA] {
+		t.Errorf("expected %s (transient API error) to REMAIN advertised, got %v", ipA, c.advertised)
+	}
+	// ipB was advertised but is no longer present in the fetched services, so
+	// it is stale and must be withdrawn.
+	if _, ok := c.advertised[ipB]; ok {
+		t.Errorf("expected %s (stale) to be removed from advertised, got %v", ipB, c.advertised)
+	}
+	if fr.hasCall("no network " + ipA + "/32") {
+		t.Errorf("must NOT withdraw the route hit by a transient API error, got: %v", fr.calls)
+	}
+	if !fr.hasCall("no network " + ipB + "/32") {
+		t.Errorf("expected withdrawal of the stale %s, got: %v", ipB, fr.calls)
 	}
 }
 

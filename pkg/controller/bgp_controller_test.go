@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -9,6 +10,12 @@ import (
 
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/health"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // fakeRunner records every command invoked and returns a canned success or
@@ -42,6 +49,14 @@ func (f *fakeRunner) hasCall(sub string) bool {
 	return false
 }
 
+// lastCall returns the most recent command recorded, or "" if none.
+func (f *fakeRunner) lastCall() string {
+	if len(f.calls) == 0 {
+		return ""
+	}
+	return f.calls[len(f.calls)-1]
+}
+
 func newTestController(run CommandRunner) *BGPServiceController {
 	return &BGPServiceController{
 		client: nil,
@@ -55,13 +70,14 @@ func newTestController(run CommandRunner) *BGPServiceController {
 	}
 }
 
-func TestWithdrawStaleRoutes_RemovesWithdrawnIPs(t *testing.T) {
+func TestWithdrawStaleRoutes_RemovesUnconfirmedIPs(t *testing.T) {
 	fr := &fakeRunner{}
 	c := newTestController(fr.run)
 	c.advertised["10.0.0.1"] = true
 	c.advertised["10.0.0.2"] = true
 
-	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true})
+	// 10.0.0.1 confirmed healthy; 10.0.0.2 in neither set → withdraw.
+	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true}, map[string]bool{})
 
 	if !c.advertised["10.0.0.1"] {
 		t.Error("10.0.0.1 should remain in advertised set")
@@ -77,12 +93,35 @@ func TestWithdrawStaleRoutes_RemovesWithdrawnIPs(t *testing.T) {
 	}
 }
 
-func TestWithdrawStaleRoutes_NoOpWhenAllHealthy(t *testing.T) {
+func TestWithdrawStaleRoutes_PreservesTransientErrorRoute(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+	c.advertised["10.0.0.1"] = true
+	c.advertised["10.0.0.2"] = true
+
+	// 10.0.0.1 hit a transient API error (kept); 10.0.0.2 is stale (neither).
+	c.withdrawStaleRoutes(map[string]bool{}, map[string]bool{"10.0.0.1": true})
+
+	if !c.advertised["10.0.0.1"] {
+		t.Error("10.0.0.1 (transient error) should remain in advertised set")
+	}
+	if _, ok := c.advertised["10.0.0.2"]; ok {
+		t.Error("10.0.0.2 (stale) should have been removed from advertised set")
+	}
+	if fr.hasCall("no network 10.0.0.1/32") {
+		t.Errorf("must NOT withdraw the route hit by a transient API error, got: %v", fr.calls)
+	}
+	if !fr.hasCall("no network 10.0.0.2/32") {
+		t.Errorf("expected withdrawal of the stale 10.0.0.2, got: %v", fr.calls)
+	}
+}
+
+func TestWithdrawStaleRoutes_NoOpWhenAllConfirmed(t *testing.T) {
 	fr := &fakeRunner{}
 	c := newTestController(fr.run)
 	c.advertised["10.0.0.1"] = true
 
-	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true})
+	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true}, map[string]bool{})
 
 	if !c.advertised["10.0.0.1"] {
 		t.Error("10.0.0.1 should remain in advertised set")
@@ -95,7 +134,7 @@ func TestWithdrawStaleRoutes_NoOpWhenAllHealthy(t *testing.T) {
 func TestWithdrawStaleRoutes_EmptyAdvertised(t *testing.T) {
 	fr := &fakeRunner{}
 	c := newTestController(fr.run)
-	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true})
+	c.withdrawStaleRoutes(map[string]bool{"10.0.0.1": true}, map[string]bool{})
 
 	if len(c.advertised) != 0 {
 		t.Errorf("advertised should be empty, got %v", c.advertised)
@@ -324,5 +363,67 @@ func TestLoopbackInterface_FoundByFlag(t *testing.T) {
 	}
 	if iface.Flags&net.FlagLoopback == 0 {
 		t.Fatalf("loopbackInterface() returned %s which is not flagged loopback", iface.Name)
+	}
+}
+
+// Finding 5: a transient API error (not a 404) must not withdraw a healthy
+// route. performHealthCheck returns errored=true, processService returns
+// outcomeKeep, and the control loop leaves the advertised route up.
+func TestProcessService_TransientAPIErrorKeepsRoute(t *testing.T) {
+	objs := []runtime.Object{
+		&v1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"},
+			Spec:       v1.ServiceSpec{ClusterIP: "10.0.0.50"},
+		},
+	}
+	client := fake.NewSimpleClientset(objs...)
+	client.PrependReactor("get", "endpoints", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection reset by peer (transient)")
+	})
+
+	fr := &fakeRunner{}
+	c := &BGPServiceController{
+		client:        client,
+		config:        &config.Config{BGP: config.BGPConfig{Enabled: true, ASN: 65000}},
+		ctx:           context.Background(),
+		healthChecker: health.NewChecker(),
+		run:           fr.run,
+		advertised:    map[string]bool{"10.0.0.50": true},
+	}
+
+	if got := c.processService(*objs[0].(*v1.Service)); got != outcomeKeep {
+		t.Fatalf("expected outcomeKeep on transient API error, got %v", got)
+	}
+	if !c.advertised["10.0.0.50"] {
+		t.Error("advertised route must be preserved on a transient API error (Finding 5)")
+	}
+	if len(fr.calls) != 0 {
+		t.Errorf("no FRR commands expected on a transient API error, got: %v", fr.calls)
+	}
+}
+
+// Finding 5: a service whose endpoints are gone (404) is withdrawn.
+func TestProcessService_ServiceDeletedWithdraws(t *testing.T) {
+	objs := []runtime.Object{
+		&v1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gone"},
+			Spec:       v1.ServiceSpec{ClusterIP: "10.0.0.51"},
+		},
+	}
+	// No Endpoints object in the clientset → Get returns IsNotFound.
+	client := fake.NewSimpleClientset(objs...)
+
+	fr := &fakeRunner{}
+	c := &BGPServiceController{
+		client:        client,
+		config:        &config.Config{BGP: config.BGPConfig{Enabled: true, ASN: 65000}},
+		ctx:           context.Background(),
+		healthChecker: health.NewChecker(),
+		run:           fr.run,
+		advertised:    map[string]bool{"10.0.0.51": true},
+	}
+
+	if got := c.processService(*objs[0].(*v1.Service)); got != outcomeWithdraw {
+		t.Fatalf("expected outcomeWithdraw for a deleted service, got %v", got)
 	}
 }

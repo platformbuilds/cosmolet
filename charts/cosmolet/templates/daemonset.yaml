@@ -32,6 +32,18 @@ spec:
               fieldPath: metadata.namespace
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+        # Finding 19: the binary exposes /healthz (liveness) and /readyz
+        # (readiness) on :8080; the Dockerfile HEALTHCHECK is ignored by
+        # kubelet, so declare in-pod probes explicitly. With hostNetwork:true
+        # these hit the host address on the node.
+        {{- with .Values.probes.liveness }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.probes.readiness }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
         volumeMounts:

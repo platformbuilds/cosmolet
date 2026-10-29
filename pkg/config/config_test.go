@@ -187,7 +187,6 @@ logging:
   format: json
 frr:
   socket_path: /run/frr/vty
-  config_path: /etc/frr/frr.conf
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -216,9 +215,6 @@ frr:
 	}
 	if cfg.FRR.SocketPath != "/run/frr/vty" {
 		t.Fatalf("expected socket path /run/frr/vty, got %s", cfg.FRR.SocketPath)
-	}
-	if cfg.FRR.ConfigPath != "/etc/frr/frr.conf" {
-		t.Fatalf("expected config path /etc/frr/frr.conf, got %s", cfg.FRR.ConfigPath)
 	}
 }
 
@@ -356,13 +352,6 @@ func TestGetFRRSocketPath(t *testing.T) {
 	}
 }
 
-func TestGetFRRConfigPath(t *testing.T) {
-	c := &Config{FRR: FRRConfig{ConfigPath: "/etc/frr/frr.conf"}}
-	if got := c.GetFRRConfigPath(); got != "/etc/frr/frr.conf" {
-		t.Fatalf("GetFRRConfigPath() = %s", got)
-	}
-}
-
 func TestGetVtyshSocketArgs_Set(t *testing.T) {
 	c := &Config{FRR: FRRConfig{SocketPath: "/run/frr/vty"}}
 	got := c.GetVtyshSocketArgs()
@@ -381,7 +370,7 @@ func TestGetVtyshSocketArgs_Empty(t *testing.T) {
 func TestYAMLSnakeCaseTagsMapToCorrectFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	body := "services:\n  namespaces:\n    - ns-a\nloop_interval_seconds: 7\nbgp:\n  enabled: true\n  asn: 100\nlogging:\n  level: warn\n  format: json\nfrr:\n  socket_path: /tmp/frr.sock\n  config_path: /tmp/frr.conf\n"
+	body := "services:\n  namespaces:\n    - ns-a\nloop_interval_seconds: 7\nbgp:\n  enabled: true\n  asn: 100\nlogging:\n  level: warn\n  format: json\nfrr:\n  socket_path: /tmp/frr.sock\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
 	}
@@ -400,9 +389,6 @@ func TestYAMLSnakeCaseTagsMapToCorrectFields(t *testing.T) {
 	}
 	if cfg.FRR.SocketPath != "/tmp/frr.sock" {
 		t.Errorf("frr.socket_path did not map to FRR.SocketPath: got %q", cfg.FRR.SocketPath)
-	}
-	if cfg.FRR.ConfigPath != "/tmp/frr.conf" {
-		t.Errorf("frr.config_path did not map to FRR.ConfigPath: got %q", cfg.FRR.ConfigPath)
 	}
 	if len(cfg.Services.Namespaces) != 1 || cfg.Services.Namespaces[0] != "ns-a" {
 		t.Errorf("services.namespaces did not map to Services.Namespaces: got %v", cfg.Services.Namespaces)
