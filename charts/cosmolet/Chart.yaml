@@ -10,13 +10,13 @@ keywords:
   - frr
   - service-mesh
   - load-balancing
-home: https://github.com/your-org/cosmolet
+home: https://github.com/platformbuilds/cosmolet
 sources:
-  - https://github.com/your-org/cosmolet
+  - https://github.com/platformbuilds/cosmolet
 maintainers:
-  - name: Your Name
-    email: your-email@example.com
-    url: https://github.com/your-username
+  - name: Shiva Kumar RV
+    email: rv@platformbuilds.org
+    url: https://platformbuilds.org
 annotations:
   category: Networking
   licenses: Apache-2.0

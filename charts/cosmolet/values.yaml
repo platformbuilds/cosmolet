@@ -2,9 +2,14 @@
 replicaCount: 1
 
 image:
-  repository: platformbuilds/cosmolet
+  # Defaults match `make docker-build` (Makefile DOCKER_REGISTRY/
+  # DOCKER_REPOSITORY). The tag defaults to the chart appVersion so the
+  # chart and the build share a single version source; override with
+  # --set image.tag to pin a specific build.
+  registry: docker.io
+  repository: cosmolet/cosmolet
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: ""
 
 # Configuration rendered into the cosmolet ConfigMap (config.yaml) in the
 # binary's snake_case schema (see pkg/config/config.go). The keys below are
