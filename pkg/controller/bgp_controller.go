@@ -242,6 +242,31 @@ func (c *BGPServiceController) performHealthCheck(service v1.Service) (bool, err
 	return isHealthy, nil
 }
 
+// routePrefix returns the host route for a cluster IP, with a prefix length
+// appropriate to its family: /32 for IPv4, /128 for IPv6.
+func routePrefix(clusterIP string) string {
+	if strings.Contains(clusterIP, ":") {
+		return clusterIP + "/128"
+	}
+	return clusterIP + "/32"
+}
+
+// bgpAddressFamily returns the FRR address-family command for the IP family.
+func bgpAddressFamily(clusterIP string) string {
+	if strings.Contains(clusterIP, ":") {
+		return "address-family ipv6 unicast"
+	}
+	return "address-family ipv4 unicast"
+}
+
+// bgpShowCommand builds the vtysh command to look up a route for the family.
+func bgpShowCommand(clusterIP string) string {
+	if strings.Contains(clusterIP, ":") {
+		return "show bgp ipv6 unicast " + clusterIP
+	}
+	return "show ip bgp " + clusterIP
+}
+
 // isServiceAdvertisedByFRR checks if the ClusterIP is locally assigned and advertised via BGP
 func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool, error) {
 
@@ -274,16 +299,18 @@ func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool,
 
 	log.Printf("ClusterIP %s is on loopback interface", clusterIP)
 
-	// Step 2: Check if BGP is advertising this IP and sourced locally
-	output, err := c.run("vtysh", "-c", "show ip bgp "+clusterIP)
+	// Step 2: Check if BGP is advertising this IP and sourced locally.
+	// FRR marks a locally-originated (network-announced) route with "*>";
+	// the old substring match on "sourced"/"valid" was unreliable.
+	output, err := c.run("vtysh", "-c", bgpShowCommand(clusterIP))
 	if err != nil {
 		return false, fmt.Errorf("failed to check BGP advertisement for %s: %v\nOutput: %s", clusterIP, err, output)
 	}
 
 	outStr := string(output)
-	isLocal := strings.Contains(outStr, "sourced") && strings.Contains(outStr, "valid")
+	isLocal := strings.Contains(outStr, "*>")
 
-	log.Printf("BGP advertisement check for %s: sourced locally = %v", clusterIP, isLocal)
+	log.Printf("BGP advertisement check for %s: locally advertised = %v", clusterIP, isLocal)
 	return isLocal, nil
 }
 
@@ -296,7 +323,7 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 		return nil
 	}
 
-	route := fmt.Sprintf("%s/32", clusterIP)
+	route := routePrefix(clusterIP)
 	asn := c.config.GetBGPASN()
 	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
@@ -308,7 +335,7 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 		"vtysh",
 		"-c", "configure terminal",
 		"-c", fmt.Sprintf("router bgp %d", asn),
-		"-c", "address-family ipv4 unicast",
+		"-c", bgpAddressFamily(clusterIP),
 		"-c", fmt.Sprintf("network %s", route),
 		"-c", "exit-address-family",
 		"-c", "exit",
@@ -330,14 +357,14 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 // Best-effort: each command failure is logged, not returned, because the goal
 // is to converge FRR state on shutdown/withdrawal even if one step fails.
 func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
-	route := fmt.Sprintf("%s/32", clusterIP)
+	route := routePrefix(clusterIP)
 	asn := c.config.GetBGPASN()
 
 	if output, err := c.run(
 		"vtysh",
 		"-c", "configure terminal",
 		"-c", fmt.Sprintf("router bgp %d", asn),
-		"-c", "address-family ipv4 unicast",
+		"-c", bgpAddressFamily(clusterIP),
 		"-c", fmt.Sprintf("no network %s", route),
 		"-c", "exit-address-family",
 		"-c", "exit",

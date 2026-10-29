@@ -97,3 +97,38 @@ Cosmolet is documented as a Kubernetes controller that advertises Kubernetes ser
 - What is wrong: In the Task 3 withdrawal implementation, `processService` added the ClusterIP to the `advertised` map even when `advertiseServiceViaBGP` returned an error (i.e., the vtysh `network` command failed). The map is the source of truth for what `withdrawStaleRoutes` will later tear down.
 - How it fails in practice: vtysh fails once (FRR restart, transient socket error). The IP is recorded as "advertised" though FRR has no such route. On the next loop the service is still healthy, so it is not re-advertised (the `isServiceAdvertisedByFRR` loopback check also says "not on lo" and would re-add it — but if the IP *is* on lo from a previous successful add, the check passes and no re-add happens). Meanwhile, if the service later becomes unhealthy, `withdrawStaleRoutes` issues `no network` for a route that was never successfully added, and the genuinely-never-advertised route is never retried on recovery because the map entry was already consumed. Net effect: silent loss of a route that should be advertised, with no error surfaced beyond a log line.
 - Fix: Fixed in the CommandRunner refactor commit (this branch). `processService` now only sets `advertised[clusterIP]=true` after `advertiseServiceViaBGP` returns nil. Added `TestAdvertiseServiceViaBGP_FailureNotMarkedAdvertised` to prove the invariant. Also introduced the `CommandRunner` interface so the above and all other vtysh/ip interactions are unit-testable without real binaries (production behaviour unchanged: `execRunner` is the default).
+
+### Finding 8
+- Severity: P1
+- File: pkg/config/config.go:91-128 (Validate); consumed at pkg/controller/bgp_controller.go:327, 361
+- What is wrong: `Validate()` never checks the BGP ASN. When `bgp.asn` is unset it stays `0`, and the controller emits `router bgp 0` — an invalid FRR command (FRR accepts `0` only as the "auto AS" token in a specific context, never as a configured local AS for `network` advertisement).
+- How it fails in practice: A deployment that forgets to set `bgp.asn` boots "successfully" (Validate passes), then every advertise/withdraw issues `router bgp 0`, FRR rejects the command, and no route is ever announced. The failure is a per-service log line that is easy to miss, so the whole BGP layer appears to run while announcing nothing.
+- Fix: Fixed (this branch). `Validate()` now rejects `bgp.asn` outside `1..4294967295` when `bgp.enabled` is true, so misconfiguration fails fast at startup. Covered by `pkg/config/config_test.go` (zero/negative/oversized ASN rejected; max ASN and BGP-disabled-with-ASN-0 accepted).
+
+### Finding 9
+- Severity: P1
+- File: pkg/controller/bgp_controller.go (routePrefix / bgpAddressFamily / bgpShowCommand usage in advertise:326,338; withdraw:360,367; check:305)
+- What is wrong: No IPv6 support. Route prefix was hardcoded to `<ip>/32`, the address family hardcoded to `address-family ipv4 unicast`, and the show command hardcoded to `show ip bgp <ip>`. An IPv6 ClusterIP (`fd00::…`) would produce `fd00::x/32` (wrong mask) under the IPv4 family, so it is never announced and never correctly detected as already-announced.
+- How it fails in practice: On a dual-stack or IPv6 cluster, services with IPv6 ClusterIPs are silently not advertised (and the idempotency check misbehaves), while the controller logs success.
+- Fix: Fixed (this branch). Added family-aware helpers: `routePrefix` (`/32` vs `/128`), `bgpAddressFamily` (`ipv4`/`ipv6 unicast`), `bgpShowCommand` (`show ip bgp` vs `show bgp ipv6 unicast`). All three call sites (advertise, withdraw, is-advertised check) use them. Covered by `TestAdvertiseServiceViaBGP_IPv6UsesFamilyAndPrefix`, `TestWithdrawServiceViaBGP_IPv6UsesFamilyAndPrefix`, and the three helper unit tests.
+
+### Finding 10
+- Severity: P2
+- File: pkg/controller/bgp_controller.go:295-314 (isServiceAdvertisedByFRR)
+- What is wrong: The idempotency check parsed `show ip bgp <ip>` output for the substrings `"sourced"` and `"valid"` to decide whether the route was locally originated. Those are not reliable tokens in FRR output (the "local" column is `-` for network routes; "sourced" is not standard `show ip bgp` output), so the check is essentially guessing.
+- How it fails in practice: The controller either concludes an already-advertised route is not advertised (re-runs `ip addr add` + `network` every 30 s — noisy, and combined with `write memory` rewrites frr.conf on every loop) or, worse, concludes a not-yet-advertised route is advertised and skips advertising it.
+- Fix: Fixed (this branch). The check now looks for the `*>` best-path marker in the output, which is the standard FRR indicator that a route is installed and selected. (Full route-state correctness still depends on FRR's exact output format; a dedicated `show bgp` parser would be more robust — see Recommendation below.)
+
+### Finding 11
+- Severity: P2
+- File: pkg/config/config.go:27-33 (FRRConfig), consumed nowhere in pkg/controller or cmd
+- What is wrong: `FRRConfig.SocketPath` and `FRRConfig.ConfigPath` are validated/configurable but never read by the controller. `vtysh` is invoked as a bare command (via `execRunner`) with no `-s <socket>` or config-path arguments, so the documented knobs have no effect.
+- How it fails in practice: A user sets `frr.socket_path` or `frr.config_path` pointing at a non-default FRR instance and it silently has no effect — the controller always talks to whatever `vtysh` resolves to on `PATH`. Config and reality diverge.
+- Fix: Left unfixed (needs a decision). Two reasonable directions: (a) make `execRunner` pass `-s <socket_path>` to `vtysh` so the knob actually works, or (b) remove the dead config fields to avoid a false guarantee. Recommendation: (a) if alternate FRR sockets are a real use case, else (b). Not implemented because it changes runtime command construction and should be a deliberate, tested decision.
+
+### Finding 12
+- Severity: P2 (observation, no code change)
+- File: pkg/controller/bgp_controller.go:348 (advertise), :377 (withdraw)
+- What is wrong: `write memory` is called after every advertise and every withdraw, rewriting `/etc/frr/frr.conf` (or whatever `write memory` targets) on each 30 s loop iteration for every service.
+- How it fails in practice: Constant rewrites of the FRR config file on every loop — unnecessary I/O, and a source of churn if `write memory` is slow or the filesystem is constrained. It is not incorrect per se (it makes FRR state survive restarts, which the original design relies on), but persisting on every idempotent no-op loop is wasteful.
+- Fix: Left unfixed (needs a decision). A safe improvement is to persist only when the set of advertised routes actually changes, not on every loop. Not implemented because it touches persistence semantics that interact with the (absent) leader-election design — a human should confirm the intended durability model before changing it.

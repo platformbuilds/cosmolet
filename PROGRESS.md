@@ -48,3 +48,16 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Result: 7 controller tests pass under `go test -race -count=1`. No production behavior change.
 - New finding: P1 "advertised map marked on vtysh failure" — fixed in this commit (see REVIEW.md Finding 7).
 - Commit: 8304dc9
+
+### Task 4 — Phase 2: FRR integration
+- Start: Thu Oct 29 04:27 PDT 2026
+- End: (filled at commit)
+- What: FRR-integration review (done in main session; subagent gateway was rate-limited). Verified the 8 research leads against source (file:line). Implemented two P1 fixes: (a) ASN validation in `config.Validate()` — reject `bgp.asn` outside 1..4294967295 when `bgp.enabled` (Finding 8); (b) IPv6 support via family-aware helpers `routePrefix` (/32 vs /128), `bgpAddressFamily` (ipv4/ipv6 unicast), `bgpShowCommand` (`show ip bgp` vs `show bgp ipv6 unicast`), wired into advertise/withdraw/is-advertised (Finding 9). Also hardened the `isServiceAdvertisedByFRR` output parse from the unreliable `"sourced"`+`"valid"` substring match to the FRR best-path marker `"*>"` (Finding 10). Logged two leads as findings left unfixed pending a human decision: dead `FRRConfig.SocketPath`/`ConfigPath` config (Finding 11) and `write memory` on every loop (Finding 12).
+- Result:
+  - Finding 8 (P1, ASN 0/invalid): FIXED — `config.Validate()`; tests in new `pkg/config/config_test.go` (10 cases).
+  - Finding 9 (P1, no IPv6): FIXED — family-aware helpers; tests `TestAdvertiseServiceViaBGP_IPv6UsesFamilyAndPrefix`, `TestWithdrawServiceViaBGP_IPv6UsesFamilyAndPrefix`, + 3 helper unit tests.
+  - Finding 10 (P2, fragile output parse): FIXED — `*>` best-path marker (logic covered by the helper/command tests; loopback gate unchanged).
+  - Finding 11 (P2, dead FRR config knobs): LEFT UNFIXED — needs decision (wire `-s <socket>` vs remove fields).
+  - Finding 12 (P2, `write memory` every loop): LEFT UNFIXED — needs decision (persist only on route-set change).
+  - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...` all pass (config: 10 tests, controller: 11 tests).
+- Commits: (filled after commit)

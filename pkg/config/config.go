@@ -124,6 +124,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("frr.socket_path cannot be empty")
 	}
 
+	// Validate BGP ASN when BGP is enabled. FRR requires a non-zero ASN;
+	// "router bgp 0" is rejected, so 0 (the zero value when unset) is invalid.
+	if c.BGP.Enabled {
+		if c.BGP.ASN < 1 || c.BGP.ASN > 4294967295 {
+			return fmt.Errorf("bgp.asn must be between 1 and 4294967295 when bgp.enabled is true (got %d)", c.BGP.ASN)
+		}
+	}
+
 	return nil
 }
 

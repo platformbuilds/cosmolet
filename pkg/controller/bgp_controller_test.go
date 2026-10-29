@@ -171,3 +171,72 @@ func TestAdvertiseServiceViaBGP_FailureNotMarkedAdvertised(t *testing.T) {
 		t.Error("advertised must not contain the IP after a failed advertise")
 	}
 }
+
+func TestRoutePrefix_FamilyAware(t *testing.T) {
+	cases := map[string]string{
+		"10.0.0.5":      "10.0.0.5/32",
+		"fd00::1":       "fd00::1/128",
+		"2001:db8::42":  "2001:db8::42/128",
+	}
+	for in, want := range cases {
+		if got := routePrefix(in); got != want {
+			t.Errorf("routePrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBgpAddressFamily_FamilyAware(t *testing.T) {
+	if got := bgpAddressFamily("10.0.0.5"); got != "address-family ipv4 unicast" {
+		t.Errorf("expected ipv4 address-family, got %q", got)
+	}
+	if got := bgpAddressFamily("fd00::1"); got != "address-family ipv6 unicast" {
+		t.Errorf("expected ipv6 address-family, got %q", got)
+	}
+}
+
+func TestBgpShowCommand_FamilyAware(t *testing.T) {
+	if got := bgpShowCommand("10.0.0.5"); got != "show ip bgp 10.0.0.5" {
+		t.Errorf("expected ipv4 show command, got %q", got)
+	}
+	if got := bgpShowCommand("fd00::1"); got != "show bgp ipv6 unicast fd00::1" {
+		t.Errorf("expected ipv6 show command, got %q", got)
+	}
+}
+
+func TestAdvertiseServiceViaBGP_IPv6UsesFamilyAndPrefix(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+
+	if err := c.advertiseServiceViaBGP("fd00:1234::42"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fr.hasCall("ip addr add fd00:1234::42/128 dev lo") {
+		t.Errorf("expected ipv6 /128 loopback add, got: %v", fr.calls)
+	}
+	if !fr.hasCall("address-family ipv6 unicast") {
+		t.Errorf("expected ipv6 address-family, got: %v", fr.calls)
+	}
+	if !fr.hasCall("network fd00:1234::42/128") {
+		t.Errorf("expected ipv6 network command, got: %v", fr.calls)
+	}
+	if fr.hasCall("address-family ipv4 unicast") {
+		t.Errorf("must not use ipv4 address-family for an ipv6 cluster ip, got: %v", fr.calls)
+	}
+}
+
+func TestWithdrawServiceViaBGP_IPv6UsesFamilyAndPrefix(t *testing.T) {
+	fr := &fakeRunner{}
+	c := newTestController(fr.run)
+
+	c.withdrawServiceViaBGP("fd00:1234::42")
+
+	if !fr.hasCall("no network fd00:1234::42/128") {
+		t.Errorf("expected ipv6 /128 withdrawal, got: %v", fr.calls)
+	}
+	if !fr.hasCall("address-family ipv6 unicast") {
+		t.Errorf("expected ipv6 address-family on withdraw, got: %v", fr.calls)
+	}
+	if !fr.hasCall("ip addr del fd00:1234::42/128 dev lo") {
+		t.Errorf("expected ipv6 loopback del, got: %v", fr.calls)
+	}
+}
