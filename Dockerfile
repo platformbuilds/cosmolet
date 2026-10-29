@@ -17,8 +17,8 @@ ARG VERSION=beta
 ARG GIT_COMMIT=7e4ebc0
 ARG BUILD_DATE=20250724
 
-# Performing tidy check
-RUN go mod tidy
+# Verify the committed module graph (reproducible builds); do NOT tidy at build time.
+RUN go mod verify
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
