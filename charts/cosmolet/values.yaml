@@ -6,6 +6,9 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+# Configuration rendered into the cosmolet ConfigMap (config.yaml) in the
+# binary's snake_case schema (see pkg/config/config.go). The keys below are
+# camelCase in values.yaml for Helm convention but are rendered as snake_case.
 config:
   services:
     namespaces:
@@ -14,9 +17,15 @@ config:
   loopIntervalSeconds: 30
   bgp:
     enabled: true
+    # BGP autonomous system number (1..4294967295). Required and validated
+    # when bgp.enabled is true (see Finding 8). Override per deployment.
+    asn: 65001
   logging:
     level: "info"
     format: "text"
+  frr:
+    # Path to the FRR unix socket. Mounts the same /var/run/frr as the pod.
+    socketPath: "/var/run/frr"
 
 resources:
   limits:

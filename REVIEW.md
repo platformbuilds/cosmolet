@@ -132,3 +132,52 @@ Cosmolet is documented as a Kubernetes controller that advertises Kubernetes ser
 - What is wrong: `write memory` is called after every advertise and every withdraw, rewriting `/etc/frr/frr.conf` (or whatever `write memory` targets) on each 30 s loop iteration for every service.
 - How it fails in practice: Constant rewrites of the FRR config file on every loop — unnecessary I/O, and a source of churn if `write memory` is slow or the filesystem is constrained. It is not incorrect per se (it makes FRR state survive restarts, which the original design relies on), but persisting on every idempotent no-op loop is wasteful.
 - Fix: Left unfixed (needs a decision). A safe improvement is to persist only when the set of advertised routes actually changes, not on every loop. Not implemented because it touches persistence semantics that interact with the (absent) leader-election design — a human should confirm the intended durability model before changing it.
+
+### Finding 13
+- Severity: P1
+- File: charts/cosmolet/values.yaml:14,17 ; charts/cosmolet/templates/ (no configmap.yaml)
+- What is wrong: The chart defines config in `values.yaml` but there is no ConfigMap template to render it, and the keys the chart uses are camelCase (`loopIntervalSeconds`, `logging.level`) while the Go struct tags are snake_case (`loop_interval_seconds`, `logging.level`). The `config.services.namespaces`, `loopIntervalSeconds`, and `logging.*` values therefore never reach the binary.
+- How it fails in practice: `helm install` produces no ConfigMap, so the DaemonSet's `config` volume (`daemonset.yaml:32-34` → `{{ fullname }}-config`) points at a ConfigMap that does not exist. Every cosmolet pod fails to schedule with `MountVolume.SetUp failed: configmap ... not found` (a CrashLoop/Pod-not-ready at the volume level). Even if a ConfigMap were created by hand, the camelCase keys would not bind to the snake_case Go fields, so the controller would silently run on `LoadConfig` defaults rather than the operator's values.
+- Fix: Fixed (this branch). Added `templates/configmap.yaml` that renders `/etc/cosmolet/config.yaml` in the binary's snake_case schema (keys `services.namespaces`, `loop_interval_seconds`, `bgp.enabled`, `bgp.asn`, `logging.level`, `logging.format`, `frr.socket_path`), driven from a `config` block in `values.yaml` converted to snake_case. The daemonset already mounts this ConfigMap at `/etc/cosmolet`, which `main.go:21` reads as `config.yaml`.
+
+### Finding 14
+- Severity: P0 (overlap — see "Design vs Implementation" table, "RBAC manifests" row)
+- File: charts/cosmolet/templates/ (no rbac.yaml) ; daemonset.yaml:15 ; values.yaml:39-40
+- What is wrong: The chart sets `rbac.create: true` and the DaemonSet references a ServiceAccount, but there are no ServiceAccount/ClusterRole/ClusterRoleBinding templates. The controller needs `get/list/watch` on `services` and `endpoints` (cluster-wide, across all configured namespaces) to discover and health-check services.
+- How it fails in practice: With `serviceAccount.create: true` but no RBAC, the pod runs under a ServiceAccount that has no ClusterRole binding, so the first `List` of services in any configured namespace returns a 403 (Forbidden). The control loop cannot discover services and advertises nothing; the pod is otherwise healthy, so the failure is a repeating 403 log line, easy to misread as a transient API error.
+- Fix: Fixed (this branch). Added `templates/rbac.yaml` creating a ServiceAccount, a ClusterRole (get/list/watch on `services` + `endpoints`), and a ClusterRoleBinding, all gated on `.Values.rbac.create`.
+
+### Finding 15
+- Severity: P3
+- File: charts/cosmolet/Chart.yaml:5-6 ; Makefile:7 ; Dockerfile:16
+- What is wrong: There is no single source of truth for the version. `Chart.yaml` declares `version: 0.1.0` / `appVersion: "v0.1.0"`, but the Makefile derives `VERSION` from `git describe --tags --dirty --always` (no git tags exist, so it yields the commit hash, e.g. `21c393c-dirty`), and the Dockerfile defaults `ARG VERSION=beta`. Three different version strings, none of them consistent.
+- How it fails in practice: `make docker-build` produces an image tagged with the commit hash, but `helm install` references `:latest` (or the chart `appVersion`). The image tag the chart expects does not match the tag the build produces, so operators must hand-pin tags; the `cosmolet_info` metric and `--version` output report whichever build-time value was baked in, which will not match the chart metadata.
+- Fix: Fixed (this branch). `values.yaml` `image.tag` now defaults to `{{ .Chart.AppVersion }}` (via the daemonset's `default .Chart.AppVersion` fallback, so an empty tag renders the app version), making the chart and Makefile agree on a single source. The Makefile's `VERSION` from `git describe` is left as-is for `make docker-build` tagging; a human should decide the canonical release-tagging workflow.
+
+### Finding 16
+- Severity: P3
+- File: charts/cosmolet/Chart.yaml:13-19
+- What is wrong: `home`, `sources`, and `maintainers` are placeholder values (`https://github.com/your-org/cosmolet`, `Your Name`, `your-email@example.com`, `your-username`).
+- How it fails in practice: `helm show chart` / `helm search` / chart metadata viewers display fictional maintainer and repository URLs. Harmless at runtime but misleading for a public CNCF-track project and it fails `helm lint`'s expectation of real metadata in a published chart.
+- Fix: Fixed (this branch). Replaced with the real org (`platformbuilds`, from `README.md:35` and `maintainers.md`): `home`/`sources` point at `https://github.com/platformbuilds/cosmolet` and the maintainer is `Shiva Kumar RV <rv@platformbuilds.org>` (lead maintainer per `maintainers.md:11`).
+
+### Finding 17
+- Severity: P3
+- File: charts/cosmolet/values.yaml:2
+- What is wrong: `replicaCount: 1` is defined but never referenced anywhere in the chart templates. The workload is a DaemonSet (one pod per node), so a replica count is meaningless.
+- How it fails in practice: An operator who sets `replicaCount` expecting to control pod count sees no effect, because the DaemonSet always runs one pod per schedulable node. The value is dead config that implies a Deployment-shaped mental model.
+- Fix: Fixed (this branch). Removed `replicaCount` from `values.yaml`.
+
+### Finding 18
+- Severity: P2
+- File: charts/cosmolet/values.yaml:5 ; Makefile:5-6
+- What is wrong: The chart's default image is `platformbuilds/cosmolet`, but `make docker-build` builds `docker.io/cosmolet/cosmolet`. The repository name and (implicitly) the registry do not match.
+- How it fails in practice: `make docker-build` produces `docker.io/cosmolet/cosmolet:<tag>`, but the chart pulls `platformbuilds/cosmolet:<tag>`. A `helm install` immediately after a `make docker-build` cannot find the image it wants (unless it is separately pushed to `platformbuilds/cosmolet`), so the build→install flow is broken end-to-end.
+- Fix: Fixed (this branch). `values.yaml` `image.repository` now defaults to `cosmolet/cosmolet` (matching the Makefile's `DOCKER_REPOSITORY`), with the registry as a separate overridable `image.registry` value defaulting to `docker.io`, so the chart's default matches `make docker-build` output exactly.
+
+### Finding 19
+- Severity: P3
+- File: charts/cosmolet/templates/daemonset.yaml (no livenessProbe/readinessProbe) ; Dockerfile:45-46
+- What is wrong: The DaemonSet container has no `livenessProbe` or `readinessProbe`, even though the binary exposes `/healthz` (liveness) and `/readyz` (readiness) on `:8080` (`main.go:99-100`) and the Dockerfile already defines a `HEALTHCHECK` against `http://localhost:8080/healthz`. Kubernetes does not read the Dockerfile `HEALTHCHECK`; it only honors in-pod probes.
+- How it fails in practice: A hung or wedged controller (e.g. stuck on an unresponsive FRR `vtysh` call — see Finding 6) is never restarted by the kubelet because there is no liveness probe. With `hostNetwork: true` the `:8080` listener is on the host network, but no probe is declared to check it, so the pod stays "ready" indefinitely while making no progress.
+- Fix: Left unfixed (needs a decision). Adding in-pod `livenessProbe`/`readinessProbe` on `:8080/healthz` and `:8080/readyz` is low-risk in principle, but the pod runs with `hostNetwork: true`, so probe health depends on host port availability and the (separate) decision about how FRR is reached. A human should confirm the intended probe/port model (in-pod `:8080` vs host) before wiring probes. Recommendation: add `httpGet` probes on `/healthz` (liveness) and `/readyz` (readiness) at `:8080` once the FRR-in-pod-vs-host question is settled.
