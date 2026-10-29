@@ -38,6 +38,3 @@ bin/*
 # .idea/
 # .vscode/
 
-# Go Binaries
-go.mod
-go.sum
