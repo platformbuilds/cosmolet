@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
-	"net"
+
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/health"
 
@@ -22,6 +24,9 @@ type BGPServiceController struct {
 	config        *config.Config
 	ctx           context.Context
 	healthChecker *health.Checker
+
+	mu          sync.Mutex
+	advertised  map[string]bool
 }
 
 // NewBGPServiceController creates a new BGP service controller
@@ -41,6 +46,7 @@ func NewBGPServiceController(cfg *config.Config, ctx context.Context) (*BGPServi
 		config:        cfg,
 		ctx:           ctx,
 		healthChecker: health.NewChecker(),
+		advertised:    make(map[string]bool),
 	}, nil
 }
 
@@ -64,7 +70,8 @@ func (c *BGPServiceController) Start() error {
 	for {
 		select {
 		case <-c.ctx.Done():
-			log.Println("Received shutdown signal, stopping controller")
+			log.Println("Received shutdown signal, withdrawing all routes and stopping")
+			c.withdrawAllRoutes()
 			return nil
 		default:
 			c.runControlLoop()
@@ -91,15 +98,22 @@ func (c *BGPServiceController) runControlLoop() {
 	log.Printf("Found %d services to process", len(services))
 	c.healthChecker.CheckServiceDiscovery(len(services), time.Since(start))
 
-	// Step 2: Process each service
+	// Step 2: Process each service and track which are currently healthy
+	healthyIPs := make(map[string]bool)
 	for _, service := range services {
 		select {
 		case <-c.ctx.Done():
 			return
 		default:
-			c.processService(service)
+			isHealthy := c.processService(service)
+			if isHealthy {
+				healthyIPs[service.Spec.ClusterIP] = true
+			}
 		}
 	}
+
+	// Step 3: Withdraw routes for services no longer healthy or deleted
+	c.withdrawStaleRoutes(healthyIPs)
 
 	duration := time.Since(start)
 	log.Printf("Loop finished in %v. Sleeping for %d seconds...", duration, c.config.GetLoopInterval())
@@ -128,8 +142,9 @@ func (c *BGPServiceController) fetchServicesFromNamespaces() ([]v1.Service, erro
 	return allServices, nil
 }
 
-// processService handles health and BGP advertisement for one service
-func (c *BGPServiceController) processService(service v1.Service) {
+// processService handles health and BGP advertisement for one service.
+// Returns true if the service is healthy (regardless of whether advertisement succeeded).
+func (c *BGPServiceController) processService(service v1.Service) bool {
 	serviceKey := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 	clusterIP := service.Spec.ClusterIP
 
@@ -138,35 +153,42 @@ func (c *BGPServiceController) processService(service v1.Service) {
 	isHealthy, err := c.performHealthCheck(service)
 	if err != nil {
 		log.Printf("Error performing health check for service %s: %v", serviceKey, err)
-		return
+		return false
 	}
-	// Step 3: Decision - Service ClusterIP is healthy?
+	// Decision: Service ClusterIP is healthy?
 	if !isHealthy {
 		log.Printf("Service %s marked unhealthy — skipping", serviceKey)
-		return
+		return false
 	}
 
 	log.Printf("Service %s is healthy", serviceKey)
 
-	// Step 4: Check if service ClusterIP is already advertised by FRR via BGP
+	// Check if service ClusterIP is already advertised by FRR via BGP
 	isAdvertised, err := c.isServiceAdvertisedByFRR(clusterIP)
 	if err != nil {
 		log.Printf("Error checking BGP advertisement status for service %s: %v", serviceKey, err)
-		return
+		return true
 	}
-	// Step 5: Decision - Service ClusterIP is already advertised?
+	// Decision: Service ClusterIP is already advertised?
 	if isAdvertised {
 		log.Printf("Service %s already advertised — nothing to do", serviceKey)
-		return
+		c.mu.Lock()
+		c.advertised[clusterIP] = true
+		c.mu.Unlock()
+		return true
 	}
 
-	// Step 6: Advertise the Service ClusterIP using FRR
+	// Advertise the Service ClusterIP using FRR
 	log.Printf("Advertising service %s (ClusterIP: %s) via BGP", serviceKey, clusterIP)
 	if err := c.advertiseServiceViaBGP(clusterIP); err != nil {
 		log.Printf("Error advertising service %s via BGP: %v", serviceKey, err)
-		return
+		return true
 	}
+	c.mu.Lock()
+	c.advertised[clusterIP] = true
+	c.mu.Unlock()
 	log.Printf("Successfully advertised service %s", serviceKey)
+	return true
 }
 
 // performHealthCheck checks if service has at least one ready endpoint
@@ -274,6 +296,75 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 
 	log.Printf("Successfully advertised %s via BGP and saved config to /etc/frr/frr.conf", route)
 	return nil
+}
+
+// withdrawServiceViaBGP removes the BGP route and loopback IP for a cluster IP
+func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
+	route := fmt.Sprintf("%s/32", clusterIP)
+	asn := c.config.GetBGPASN()
+
+	cmd := exec.Command(
+		"vtysh",
+		"-c", "configure terminal",
+		"-c", fmt.Sprintf("router bgp %d", asn),
+		"-c", "address-family ipv4 unicast",
+		"-c", fmt.Sprintf("no network %s", route),
+		"-c", "exit-address-family",
+		"-c", "exit",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: failed to withdraw BGP route %s: %v\nOutput: %s", route, err, output)
+	} else {
+		log.Printf("Withdrawn BGP route %s", route)
+	}
+
+	writeCmd := exec.Command("vtysh", "-c", "write memory")
+	if output, err := writeCmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: failed to persist FRR config after withdrawal: %v\nOutput: %s", err, output)
+	}
+
+	delCmd := exec.Command("ip", "addr", "del", route, "dev", "lo")
+	if output, err := delCmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: failed to remove IP %s from loopback: %v\nOutput: %s", route, err, output)
+	} else {
+		log.Printf("Removed IP %s from loopback", route)
+	}
+}
+
+// withdrawStaleRoutes withdraws BGP routes for IPs that are no longer in the healthy set
+func (c *BGPServiceController) withdrawStaleRoutes(healthyIPs map[string]bool) {
+	c.mu.Lock()
+	var toWithdraw []string
+	for ip := range c.advertised {
+		if !healthyIPs[ip] {
+			toWithdraw = append(toWithdraw, ip)
+		}
+	}
+	for _, ip := range toWithdraw {
+		delete(c.advertised, ip)
+	}
+	c.mu.Unlock()
+
+	for _, ip := range toWithdraw {
+		log.Printf("Withdrawing stale route for %s", ip)
+		c.withdrawServiceViaBGP(ip)
+	}
+}
+
+// withdrawAllRoutes withdraws all BGP routes this controller has advertised
+func (c *BGPServiceController) withdrawAllRoutes() {
+	c.mu.Lock()
+	ips := make([]string, 0, len(c.advertised))
+	for ip := range c.advertised {
+		ips = append(ips, ip)
+	}
+	c.advertised = make(map[string]bool)
+	c.mu.Unlock()
+
+	for _, ip := range ips {
+		log.Printf("Shutting down: withdrawing route for %s", ip)
+		c.withdrawServiceViaBGP(ip)
+	}
 }
 
 // testKubernetesAPI tests Kubernetes API access
