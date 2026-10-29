@@ -1,0 +1,18 @@
+# Build context excludes (keeps COPY . . lean and reproducible).
+# The builder only needs source + go.mod/go.sum.
+.git
+.gitignore
+bin
+vendor
+*.test
+coverage.out
+coverage.*
+*.coverprofile
+*.md
+REVIEW.md
+PROGRESS.md
+docs
+examples
+charts
+Dockerfile
+.dockerignore
