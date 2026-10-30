@@ -16,6 +16,7 @@ type Config struct {
 	BGP                 BGPConfig      `yaml:"bgp,omitempty"`
 	Logging             LoggingConfig  `yaml:"logging,omitempty"`
 	FRR                 FRRConfig      `yaml:"frr,omitempty"`
+	OTEL                OTELConfig     `yaml:"otel,omitempty"`
 }
 
 // ServicesConfig contains service discovery configuration
@@ -38,6 +39,17 @@ type LoggingConfig struct {
 // FRRConfig contains FRR-specific configuration
 type FRRConfig struct {
 	SocketPath string `yaml:"socket_path"`
+}
+
+// OTELConfig controls OpenTelemetry tracing and metric export. Tracing is
+// always on (low-volume per-node daemon); Enabled + Endpoint enable OTLP/HTTP
+// push of traces and metrics. SampleRatio controls trace sampling: values
+// outside (0,1) mean "always sample" (the default), and a value in (0,1)
+// samples by trace-ID ratio, parent-based.
+type OTELConfig struct {
+	Enabled     bool    `yaml:"enabled"`
+	Endpoint    string  `yaml:"endpoint"`
+	SampleRatio float64 `yaml:"sample_ratio"`
 }
 
 // LoadConfig loads configuration from the specified file path
@@ -146,6 +158,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate OTEL sampling ratio. It is meaningful only when OTLP push is
+	// enabled, but we validate it unconditionally so a bad value fails fast
+	// regardless of the enabled flag.
+	if c.OTEL.SampleRatio < 0 || c.OTEL.SampleRatio > 1 {
+		return fmt.Errorf("otel.sample_ratio must be between 0 and 1 (got %v)", c.OTEL.SampleRatio)
+	}
+	// An enabled OTLP push requires an endpoint; refuse the ambiguous state
+	// (enabled with no destination) rather than silently dropping exports.
+	if c.OTEL.Enabled && c.OTEL.Endpoint == "" {
+		return fmt.Errorf("otel.endpoint is required when otel.enabled is true")
+	}
+
 	return nil
 }
 
@@ -183,4 +207,3 @@ func (c *Config) GetVtyshSocketArgs() []string {
 	}
 	return []string{"-s", c.FRR.SocketPath}
 }
-

@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/controller"
 	"cosmolet/pkg/health"
 	"cosmolet/pkg/logging"
+	"cosmolet/pkg/otel"
 )
 
 const (
@@ -24,10 +26,10 @@ const (
 )
 
 var (
-	configPath  = flag.String("config", defaultConfigPath, "Path to configuration file")
-	logLevel    = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
-	logFormat   = flag.String("log-format", defaultLogFormat, "Log format (text, json)")
-	version     = flag.Bool("version", false, "Print version information")
+	configPath = flag.String("config", defaultConfigPath, "Path to configuration file")
+	logLevel   = flag.String("log-level", defaultLogLevel, "Log level (debug, info, warn, error)")
+	logFormat  = flag.String("log-format", defaultLogFormat, "Log format (text, json)")
+	version    = flag.Bool("version", false, "Print version information")
 
 	// Build information (set via ldflags)
 	Version   = "dev"
@@ -65,15 +67,35 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start health check server
+	// Bootstrap the observability provider (OTel SDK + Prometheus reader).
+	// Tracing is always on; OTLP push exporters are wired only when
+	// otel.enabled and otel.endpoint are both set. The provider's manual
+	// reader backs the /metrics endpoint.
+	otelCfg := otel.Config{
+		Enabled:     cfg.OTEL.Enabled,
+		Endpoint:    cfg.OTEL.Endpoint,
+		SampleRatio: cfg.OTEL.SampleRatio,
+	}
+	otelProvider, err := otel.New(otelCfg, Version)
+	if err != nil {
+		log.Fatalf("Failed to bootstrap OpenTelemetry: %v", err)
+	}
+	if otelProvider.Enabled() {
+		logging.Info("OpenTelemetry enabled: pushing traces/metrics to %s (sample ratio %g)", cfg.OTEL.Endpoint, cfg.OTEL.SampleRatio)
+	} else {
+		logging.Info("OpenTelemetry tracing enabled (no OTLP push endpoint configured; /metrics still served)")
+	}
+
+	// Start health check server (now wired to the OTel metric reader)
 	healthChecker := health.NewChecker()
-	go startHealthServer(healthChecker)
+	go startHealthServer(healthChecker, otelProvider)
 
 	// Create and start BGP controller
 	bgpController, err := controller.NewBGPServiceController(cfg, ctx)
 	if err != nil {
 		log.Fatalf("Failed to create BGP service controller: %v", err)
 	}
+	bgpController.SetOTELProvider(otelProvider)
 
 	// Mark as ready
 	healthChecker.SetReady(true)
@@ -96,6 +118,14 @@ func main() {
 	if err != nil {
 		logging.Error("BGP controller error during shutdown: %v", err)
 	}
+
+	// Flush and stop the observability providers so any buffered spans and
+	// metric deltas are exported before the process exits.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if shErr := otelProvider.Shutdown(shutdownCtx); shErr != nil {
+		logging.Warn("OpenTelemetry shutdown error: %v", shErr)
+	}
+	shutdownCancel()
 
 	logging.Info("Shutting down Cosmolet BGP Service Controller")
 }
@@ -136,7 +166,7 @@ func printVersion() {
 	fmt.Printf("Build Date: %s\n", BuildDate)
 }
 
-func startHealthServer(checker *health.Checker) {
+func startHealthServer(checker *health.Checker, otelProvider *otel.Provider) {
 	mux := http.NewServeMux()
 
 	// Health endpoints
@@ -144,8 +174,11 @@ func startHealthServer(checker *health.Checker) {
 	mux.HandleFunc("/readyz", checker.ReadinessHandler)
 	mux.HandleFunc("/version", versionHandler)
 
-	// Metrics endpoint (basic for now)
-	mux.HandleFunc("/metrics", metricsHandler)
+	// Metrics endpoint: serves the OTel metric pipeline (control-loop duration,
+	// services discovered, BGP operations, advertised routes). The provider's
+	// manual reader backs promhttp so /metrics reflects real instrumented
+	// values rather than a static stub.
+	mux.Handle("/metrics", otelProvider.MetricsHandler())
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -166,14 +199,3 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 		"buildDate": "%s"
 	}`, Version, GitCommit, BuildDate)
 }
-
-func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	// Basic metrics endpoint - in a real implementation,
-	// you would use Prometheus client library
-	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprintf(w, "# HELP cosmolet_info Information about cosmolet\n")
-	fmt.Fprintf(w, "# TYPE cosmolet_info gauge\n")
-	fmt.Fprintf(w, "cosmolet_info{version=\"%s\",commit=\"%s\"} 1\n", Version, GitCommit)
-}
-
-

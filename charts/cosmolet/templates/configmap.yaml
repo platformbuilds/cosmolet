@@ -22,3 +22,7 @@ data:
       format: {{ .Values.config.logging.format | quote }}
     frr:
       socket_path: {{ .Values.config.frr.socketPath | quote }}
+    otel:
+      enabled: {{ .Values.config.otel.enabled }}
+      endpoint: {{ .Values.config.otel.endpoint | quote }}
+      sample_ratio: {{ .Values.config.otel.sampleRatio }}

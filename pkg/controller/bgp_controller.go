@@ -16,6 +16,11 @@ import (
 	"cosmolet/pkg/config"
 	"cosmolet/pkg/health"
 	"cosmolet/pkg/logging"
+	"cosmolet/pkg/otel"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -110,9 +115,70 @@ type BGPServiceController struct {
 	podName       string
 	podNamespace  string
 
+	// otelProvider is the observability provider. It is set by
+	// SetOTELProvider in production (main.go) and left nil in tests, where the
+	// spans and metric records become no-ops.
+	otelProvider *otel.Provider
+
 	mu             sync.Mutex
 	advertised     map[string]bool
 	lastAdvertised map[string]bool
+}
+
+// SetOTELProvider wires the observability provider into the controller and
+// registers the advertised-routes gauge callback so the metric reflects the
+// live count. A nil provider disables all instrumentation.
+func (c *BGPServiceController) SetOTELProvider(p *otel.Provider) {
+	c.otelProvider = p
+	if p != nil {
+		p.SetAdvertisedRoutesProvider(c.advertisedRoutesCount)
+	}
+}
+
+// advertisedRoutesCount returns the number of routes currently advertised.
+// It is called on each metric collection cycle by the observable gauge, so it
+// must be safe to call concurrently.
+func (c *BGPServiceController) advertisedRoutesCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return int64(len(c.advertised))
+}
+
+// observeLoopDuration records the control-loop duration metric. No-op when the
+// provider is nil.
+func (c *BGPServiceController) observeLoopDuration(ctx context.Context, d time.Duration) {
+	if c.otelProvider == nil {
+		return
+	}
+	c.otelProvider.RecordLoopDuration(ctx, d)
+}
+
+// observeServicesDiscovered records how many services were discovered this
+// loop. No-op when the provider is nil.
+func (c *BGPServiceController) observeServicesDiscovered(ctx context.Context, n int) {
+	if c.otelProvider == nil {
+		return
+	}
+	c.otelProvider.RecordServicesDiscovered(ctx, n)
+}
+
+// observeBGPOperation records a BGP operation with its outcome. No-op when the
+// provider is nil.
+func (c *BGPServiceController) observeBGPOperation(ctx context.Context, op, outcome string) {
+	if c.otelProvider == nil {
+		return
+	}
+	c.otelProvider.RecordBGPOperation(ctx, op, outcome)
+}
+
+// frrSpan starts a child span on the FRR tracer. It returns the input context
+// and a no-op span when the provider is nil, so callers can use the returned
+// span without branching.
+func (c *BGPServiceController) frrSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if c.otelProvider == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+	return c.otelProvider.FRRTracer().Start(ctx, name, trace.WithAttributes(attrs...))
 }
 
 // NewBGPServiceController creates a new BGP service controller
@@ -248,17 +314,33 @@ func (c *BGPServiceController) runControlLoop() {
 	c.healthChecker.UpdateLastLoop()
 	c.snapshotAdvertised()
 
+	// Observe the control loop as a span and record its duration. Spans are
+	// no-ops when otelProvider is nil (tests) and are dropped without an OTLP
+	// push endpoint in the default configuration.
+	loopCtx := c.ctx
+	var loopSpan trace.Span
+	if c.otelProvider != nil {
+		loopCtx, loopSpan = c.otelProvider.ControllerTracer().Start(c.ctx, "cosmolet.control_loop",
+			trace.WithAttributes(attribute.String("component", "bgp_controller")))
+		defer loopSpan.End()
+	}
+
 	// Step 1: Fetch all running services in configured namespaces
 	services, err := c.fetchServicesFromNamespaces()
 	if err != nil {
 		log.Printf("Error fetching services: %v", err)
 		c.healthChecker.CheckServiceDiscovery(0, time.Since(start))
+		if loopSpan != nil {
+			loopSpan.SetStatus(codes.Error, "failed to fetch services")
+		}
+		c.observeLoopDuration(loopCtx, time.Since(start))
 		c.sleep()
 		return
 	}
 
 	log.Printf("Found %d services to process", len(services))
 	c.healthChecker.CheckServiceDiscovery(len(services), time.Since(start))
+	c.observeServicesDiscovered(loopCtx, len(services))
 
 	// Step 2: Process each service. An advertised route is preserved if it is
 	// (a) confirmed healthy this iteration, or (b) its health check hit a
@@ -297,6 +379,7 @@ func (c *BGPServiceController) runControlLoop() {
 
 	duration := time.Since(start)
 	logging.Debug("Loop finished in %v. Sleeping for %d seconds...", duration, c.config.GetLoopInterval())
+	c.observeLoopDuration(loopCtx, duration)
 	c.sleep()
 }
 
@@ -368,8 +451,8 @@ type processOutcome int
 
 const (
 	outcomeAdvertise processOutcome = iota // healthy: add to healthyIPs
-	outcomeWithdraw                         // unhealthy or deleted: withdraw if advertised
-	outcomeKeep                             // transient error: leave advertised state unchanged
+	outcomeWithdraw                        // unhealthy or deleted: withdraw if advertised
+	outcomeKeep                            // transient error: leave advertised state unchanged
 )
 
 // processService handles health and BGP advertisement for one service.
@@ -434,9 +517,9 @@ func (c *BGPServiceController) processService(service v1.Service) processOutcome
 // error so the control loop can avoid route flapping during API-server
 // instability (Finding 5).
 type healthResult struct {
-	healthy     bool // meaningful only when errored == false
-	errored     bool // transient API error: don't change the advertised state
-	notFound    bool // service/endpoints gone: withdraw the route
+	healthy  bool // meaningful only when errored == false
+	errored  bool // transient API error: don't change the advertised state
+	notFound bool // service/endpoints gone: withdraw the route
 }
 
 // performHealthCheck checks if service has at least one ready endpoint. It
@@ -555,6 +638,7 @@ func (c *BGPServiceController) isServiceAdvertisedByFRR(clusterIP string) (bool,
 	isLocal := strings.Contains(outStr, "*>")
 
 	log.Printf("BGP advertisement check for %s: locally advertised = %v", clusterIP, isLocal)
+	c.observeBGPOperation(c.ctx, otel.OpCheck, "success")
 	return isLocal, nil
 }
 
@@ -571,9 +655,17 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	asn := c.config.GetBGPASN()
 	log.Printf("Advertising route %s via BGP ASN %d", route, asn)
 
+	ctx, span := c.frrSpan(c.ctx, "cosmolet.frr.advertise",
+		attribute.String("route", route),
+		attribute.Int("asn", asn),
+	)
+	defer span.End()
+
 	// Fail hard if the IP cannot be assigned: advertising a route for an IP
 	// this node cannot receive would blackhole traffic (Finding 4).
 	if output, err := c.run("ip", "addr", "add", route, "dev", "lo"); err != nil {
+		span.SetStatus(codes.Error, "failed to assign IP to loopback")
+		c.observeBGPOperation(ctx, otel.OpAdvertise, "failure")
 		return fmt.Errorf("failed to assign IP to loopback: %v\nOutput: %s", err, output)
 	}
 
@@ -588,6 +680,8 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	args = append(args, c.config.GetVtyshSocketArgs()...)
 	output, err := c.run("vtysh", args...)
 	if err != nil {
+		span.SetStatus(codes.Error, "failed to advertise route via BGP")
+		c.observeBGPOperation(ctx, otel.OpAdvertise, "failure")
 		return fmt.Errorf("failed to advertise route via BGP: %v\nOutput: %s", err, output)
 	}
 	logging.Debug("vtysh route advertisement successful: %s", output)
@@ -595,6 +689,7 @@ func (c *BGPServiceController) advertiseServiceViaBGP(clusterIP string) error {
 	// Persistence to frr.conf is handled once per loop by persistFRRConfig,
 	// not on every advertise call (Finding 12).
 	logging.Debug("Successfully advertised %s via BGP", route)
+	c.observeBGPOperation(ctx, otel.OpAdvertise, "success")
 	return nil
 }
 
@@ -616,6 +711,12 @@ func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
 	route := routePrefix(clusterIP)
 	asn := c.config.GetBGPASN()
 
+	ctx, span := c.frrSpan(c.ctx, "cosmolet.frr.withdraw",
+		attribute.String("route", route),
+		attribute.Int("asn", asn),
+	)
+	defer span.End()
+
 	args := []string{
 		"-c", "configure terminal",
 		"-c", fmt.Sprintf("router bgp %d", asn),
@@ -625,16 +726,26 @@ func (c *BGPServiceController) withdrawServiceViaBGP(clusterIP string) {
 		"-c", "exit",
 	}
 	args = append(args, c.config.GetVtyshSocketArgs()...)
+	withdrawFailed := false
 	if output, err := c.run("vtysh", args...); err != nil {
 		logging.Warn("failed to withdraw BGP route %s: %v\nOutput: %s", route, err, output)
+		withdrawFailed = true
 	} else {
 		logging.Debug("Withdrawn BGP route %s", route)
 	}
 
 	if output, err := c.run("ip", "addr", "del", route, "dev", "lo"); err != nil {
 		logging.Warn("failed to remove IP %s from loopback: %v\nOutput: %s", route, err, output)
+		withdrawFailed = true
 	} else {
 		logging.Debug("Removed IP %s from loopback", route)
+	}
+
+	if withdrawFailed {
+		span.SetStatus(codes.Error, "one or more withdraw commands failed")
+		c.observeBGPOperation(ctx, otel.OpWithdraw, "failure")
+	} else {
+		c.observeBGPOperation(ctx, otel.OpWithdraw, "success")
 	}
 }
 

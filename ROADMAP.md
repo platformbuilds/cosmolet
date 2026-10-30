@@ -12,7 +12,7 @@ Brief description of Cosmolet's purpose and intended impact.
 ### Upcoming Milestones
 | Milestone         | Target Date  | Description/Details                  |
 |-------------------|--------------|--------------------------------------|
-| v0.5.0            | 2025-11-01   | Add otel integration, improved docs |
+| v0.5.0            | 2025-11-01   | ✅ Otel integration (traces + Prometheus/OTLP metrics), Monitoring docs |
 | CNCF Sandbox App  | 2025-12-01   | Prepare submission + governance update  |
 | v1.0.0            | 2026-03-01   | Feature-complete, stable APIs           |
 

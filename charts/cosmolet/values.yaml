@@ -30,6 +30,16 @@ config:
   frr:
     # Path to the FRR unix socket. Mounts the same /var/run/frr as the pod.
     socketPath: "/var/run/frr"
+  otel:
+    # Enable OTLP/HTTP push of traces and metrics to `endpoint`. Tracing is
+    # always on; with enabled=false (default) spans are dropped and metrics
+    # are still served on /metrics. When enabled, endpoint must be set
+    # (e.g. "localhost:4318" or "http://otel-collector:4318").
+    enabled: false
+    endpoint: ""
+    # Trace sampling ratio (0..1). Values outside (0,1) mean "always sample";
+    # a value in (0,1) samples by trace-ID ratio, parent-based.
+    sampleRatio: 1
 
 resources:
   limits:

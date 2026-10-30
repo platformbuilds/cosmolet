@@ -272,8 +272,31 @@ Branch: `review-overnight` (created from `main` at `8ee3f9f`)
 - Result:
   - All 35 findings now resolved; only Finding 32's *tag creation* remains a human action.
   - Coverage: pkg/config 95.0% (33 tests), pkg/controller 56.5% (34 tests, 5 skip), pkg/health 100.0% (16), pkg/logging 93.8% (10), cmd/cosmolet 0%. 95 test functions, 5 skip on macOS, 0 fail.
-  - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `helm lint charts/cosmolet` all pass.
+   - `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `helm lint charts/cosmolet` all pass.
 - Commit: (filled after commit)
+
+### Task 15 — ROADMAP v0.5.0: OpenTelemetry integration (DONE)
+- Status: DONE
+- Result: OpenTelemetry end-to-end integration per ROADMAP v0.5.0 is implemented and all gates pass
+  (`go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `helm lint charts/cosmolet`).
+  Files: `pkg/otel/{otel.go,otel_test.go}` (SDK bootstrap + instruments + promhttp handler),
+  `pkg/controller/bgp_controller.go` (spans + metric recording, nil-safe in tests),
+  `cmd/cosmolet/main.go` (bootstrap + OTel `/metrics` + Shutdown on SIGTERM),
+  `pkg/config/config.go` (`otel` block + `Validate()`), `charts/cosmolet/values.yaml` +
+  `templates/configmap.yaml` (otel knob, default `enabled: false`), `README.md` (Monitoring
+  section), `ROADMAP.md` (v0.5.0 row marked done), `go.mod`/`go.sum` (otel v1.47.0 +
+  prometheus/client_golang v1.25.0).
+- Commit: <set on commit>
+- What: End-to-end OpenTelemetry per ROADMAP v0.5.0 ("Add otel integration, improved docs"). Plan:
+  1. **Deps** (`go mod tidy`): `go.opentelemetry.io/otel`, `/otel/sdk`, `/otel/sdk/trace`, `/otel/sdk/metric`, `/otel/sdk/resource`, `/otel/exporters/otlptrace/otlptracehttp`, `/otel/exporters/otlpmetric/otlpmetrichttp`, `prometheus/client_golang`.
+  2. **New `pkg/otel` package** — bootstrap `TracerProvider` + `MeterProvider`; `resource.New` with `service.name=cosmolet`, `service.version` from the `main.Version` ldflag; OTLP/HTTP trace + metric exporters enabled only when `otel.enabled && otel.endpoint` is set; tracers `cosmolet.controller` and `cosmolet.frr`; metrics: `cosmolet_loop_duration_seconds` (histogram), `cosmolet_services_discovered` (gauge), `cosmolet_bgp_operations_total{op,outcome}` (counter: advertise/withdraw/check), `cosmolet_advertised_routes` (gauge); `Shutdown(ctx)` flush on SIGTERM.
+  3. **Instrument `pkg/controller/bgp_controller.go`** — span per `runControlLoop` iteration (attr: services discovered, duration), span per `processService` (attr: namespace/name/clusterIP/outcome), spans around vtysh/ip exec in `advertiseServiceViaBGP` / `withdrawServiceViaBGP` / `isServiceAdvertisedByFRR`; record metrics at the same points.
+  4. **Real `/metrics`** — replace the static `cosmolet_info` stub in `cmd/cosmolet/main.go` with `promhttp.Handler()` serving the OTel metric reader (Prometheus scrape target on `:8080/metrics`).
+  5. **Config + chart wiring** — new `otel` block in `pkg/config` (`enabled`, `endpoint`, optional `sample_ratio`) + `Validate()`; render in `charts/cosmolet/templates/configmap.yaml` + `values.yaml` (default `enabled: false` so nothing ships by default).
+  6. **Docs** — README "Monitoring" section (Prometheus scrape + OTLP export); ROADMAP v0.5.0 row marked done.
+- Defaults adopted (open decisions resolved): Prometheus endpoint on `:8080/metrics` via `prometheus/client_golang`; always-on trace sampling (per-node daemon, low volume); OTLP push only when `otel.enabled && otel.endpoint` set.
+- Tests: `pkg/otel` bootstrap (manual `sdktrace`/`sdkmetric` readers, no network); controller instrumentation exercised by existing loop tests (spans are no-ops without a real provider).
+- Gates: `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `helm lint charts/cosmolet`; then sync REVIEW.md + PROGRESS.md (this entry → result).
 
 ## FINAL RUNNING SUMMARY
 
