@@ -3,8 +3,8 @@ package config
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v2"
 )
@@ -16,6 +16,7 @@ type Config struct {
 	BGP                 BGPConfig      `yaml:"bgp,omitempty"`
 	Logging             LoggingConfig  `yaml:"logging,omitempty"`
 	FRR                 FRRConfig      `yaml:"frr,omitempty"`
+	OTEL                OTELConfig     `yaml:"otel,omitempty"`
 }
 
 // ServicesConfig contains service discovery configuration
@@ -38,7 +39,17 @@ type LoggingConfig struct {
 // FRRConfig contains FRR-specific configuration
 type FRRConfig struct {
 	SocketPath string `yaml:"socket_path"`
-	ConfigPath string `yaml:"config_path,omitempty"`
+}
+
+// OTELConfig controls OpenTelemetry tracing and metric export. Tracing is
+// always on (low-volume per-node daemon); Enabled + Endpoint enable OTLP/HTTP
+// push of traces and metrics. SampleRatio controls trace sampling: values
+// outside (0,1) mean "always sample" (the default), and a value in (0,1)
+// samples by trace-ID ratio, parent-based.
+type OTELConfig struct {
+	Enabled     bool    `yaml:"enabled"`
+	Endpoint    string  `yaml:"endpoint"`
+	SampleRatio float64 `yaml:"sample_ratio"`
 }
 
 // LoadConfig loads configuration from the specified file path
@@ -61,15 +72,15 @@ func LoadConfig(configPath string) (*Config, error) {
 		},
 	}
 
-	// Check if config file exists
+	// Check if config file exists. Fail closed: a BGP routing daemon must not
+	// silently run on fail-open defaults (BGP enabled, ASN 0) when its config
+	// is missing or mispathed (Finding 24).
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// File doesn't exist, use defaults with warning
-		fmt.Printf("Warning: Config file %s not found, using defaults\n", configPath)
-		return config, nil
+		return nil, fmt.Errorf("config file %s not found (fail-closed; create it or point -config at a valid file)", configPath)
 	}
 
 	// Read config file
-	data, err := ioutil.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %v", configPath, err)
 	}
@@ -87,16 +98,31 @@ func LoadConfig(configPath string) (*Config, error) {
 	return config, nil
 }
 
+// maxLoopIntervalSeconds caps loop_interval_seconds. An unbounded value lets a
+// misconfigured daemon sleep for years between loops, wedging the control loop
+// and tripping the liveness staleness check permanently (Finding 23).
+const maxLoopIntervalSeconds = 3600
+
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
-	// Validate services configuration
+	// Validate services configuration. An empty entry ("") is the Kubernetes
+	// all-namespaces wildcard, which would silently escalate a scoped
+	// allow-list to cluster-wide discovery, so it is rejected (Finding 22).
 	if len(c.Services.Namespaces) == 0 {
 		return fmt.Errorf("at least one namespace must be specified")
+	}
+	for _, ns := range c.Services.Namespaces {
+		if strings.TrimSpace(ns) == "" {
+			return fmt.Errorf("services.namespaces must not contain empty entries (the empty string means all namespaces)")
+		}
 	}
 
 	// Validate loop interval
 	if c.LoopIntervalSeconds <= 0 {
 		return fmt.Errorf("loop_interval_seconds must be positive")
+	}
+	if c.LoopIntervalSeconds > maxLoopIntervalSeconds {
+		return fmt.Errorf("loop_interval_seconds must be at most %d (got %d)", maxLoopIntervalSeconds, c.LoopIntervalSeconds)
 	}
 
 	// Validate logging level
@@ -122,6 +148,26 @@ func (c *Config) Validate() error {
 	// Validate FRR socket path
 	if c.FRR.SocketPath == "" {
 		return fmt.Errorf("frr.socket_path cannot be empty")
+	}
+
+	// Validate BGP ASN when BGP is enabled. FRR requires a non-zero ASN;
+	// "router bgp 0" is rejected, so 0 (the zero value when unset) is invalid.
+	if c.BGP.Enabled {
+		if c.BGP.ASN < 1 || c.BGP.ASN > 4294967295 {
+			return fmt.Errorf("bgp.asn must be between 1 and 4294967295 when bgp.enabled is true (got %d)", c.BGP.ASN)
+		}
+	}
+
+	// Validate OTEL sampling ratio. It is meaningful only when OTLP push is
+	// enabled, but we validate it unconditionally so a bad value fails fast
+	// regardless of the enabled flag.
+	if c.OTEL.SampleRatio < 0 || c.OTEL.SampleRatio > 1 {
+		return fmt.Errorf("otel.sample_ratio must be between 0 and 1 (got %v)", c.OTEL.SampleRatio)
+	}
+	// An enabled OTLP push requires an endpoint; refuse the ambiguous state
+	// (enabled with no destination) rather than silently dropping exports.
+	if c.OTEL.Enabled && c.OTEL.Endpoint == "" {
+		return fmt.Errorf("otel.endpoint is required when otel.enabled is true")
 	}
 
 	return nil
@@ -152,7 +198,12 @@ func (c *Config) GetFRRSocketPath() string {
 	return c.FRR.SocketPath
 }
 
-// GetFRRConfigPath returns the FRR config path
-func (c *Config) GetFRRConfigPath() string {
-	return c.FRR.ConfigPath
+// GetVtyshSocketArgs returns the extra arguments to pass to vtysh so it talks
+// to the configured FRR socket (Finding 11). When the socket path is empty it
+// returns nil and vtysh uses its default socket.
+func (c *Config) GetVtyshSocketArgs() []string {
+	if c.FRR.SocketPath == "" {
+		return nil
+	}
+	return []string{"-s", c.FRR.SocketPath}
 }

@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
@@ -17,8 +17,8 @@ ARG VERSION=beta
 ARG GIT_COMMIT=7e4ebc0
 ARG BUILD_DATE=20250724
 
-# Performing tidy check
-RUN go mod tidy
+# Verify the committed module graph (reproducible builds); do NOT tidy at build time.
+RUN go mod verify
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -45,6 +45,6 @@ COPY --from=builder /app/cosmolet .
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1
 
-EXPOSE 8080 9090
+EXPOSE 8080
 
 CMD ["./cosmolet"]

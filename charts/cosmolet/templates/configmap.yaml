@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cosmolet.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: cosmolet
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+    services:
+      namespaces:
+        {{- range .Values.config.services.namespaces }}
+        - {{ . | quote }}
+        {{- end }}
+    loop_interval_seconds: {{ .Values.config.loopIntervalSeconds }}
+    bgp:
+      enabled: {{ .Values.config.bgp.enabled }}
+      asn: {{ .Values.config.bgp.asn }}
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+    frr:
+      socket_path: {{ .Values.config.frr.socketPath | quote }}
+    otel:
+      enabled: {{ .Values.config.otel.enabled }}
+      endpoint: {{ .Values.config.otel.endpoint | quote }}
+      sample_ratio: {{ .Values.config.otel.sampleRatio }}

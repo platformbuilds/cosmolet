@@ -195,6 +195,38 @@ go mod init github.com/platformcosmo/cosmolet  # if starting fresh
 The resulting binary will be statically linked and suitable for deployment in containers or bare-metal systems without external dependencies.
 
 
+## 📈 Monitoring
+
+Cosmolet emits Prometheus metrics on `:8080/metrics` and OpenTelemetry traces
+for the control loop and FRR operations. Metrics are served from the OpenTelemetry
+SDK's metric pipeline (via `promhttp`), so the endpoint reflects live instrumented
+values rather than a static stub.
+
+### Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `cosmolet_loop_duration_seconds` | Histogram | Duration of a single control loop iteration |
+| `cosmolet_services_discovered` | Gauge | Services discovered in the last control loop |
+| `cosmolet_bgp_operations_total` | Counter | BGP operations (`op` = advertise/withdraw/check, `outcome` = success/failure) |
+| `cosmolet_advertised_routes` | Gauge | Routes currently advertised by this controller |
+
+### Traces & OTLP push
+
+Tracing is always on (cosmolet is a low-volume per-node daemon). Spans and metrics
+can be pushed to an OTLP/HTTP collector by setting the `otel` config block. With no
+endpoint configured, spans are dropped but metrics are still scraped on `/metrics`.
+
+```yaml
+otel:
+  enabled: true
+  endpoint: "http://otel-collector:4318"  # host:port or http(s) URL
+  sample_ratio: 1.0   # 0..1; values outside (0,1) always sample
+```
+
+Set `sample_ratio` below 1.0 to sample by trace-ID ratio (parent-based) in high-cardinality
+deployments.
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.

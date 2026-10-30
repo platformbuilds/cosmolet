@@ -4,7 +4,16 @@
 BINARY_NAME := cosmolet
 DOCKER_REGISTRY := docker.io
 DOCKER_REPOSITORY := cosmolet/cosmolet
-VERSION := $(shell git describe --tags --dirty --always)
+# VERSION: prefer the nearest git tag (semver release). `git describe --tags
+# --dirty` is empty when the tree has no tags at all, so fall back to an
+# explicit "unreleased-<commit>" marker rather than a bare short hash that
+# could be mistaken for a release version (Finding 32).
+GIT_DESCRIBE := $(shell git describe --tags --dirty 2>/dev/null)
+ifneq ($(GIT_DESCRIBE),)
+  VERSION := $(GIT_DESCRIBE)
+else
+  VERSION := unreleased-$(shell git rev-parse --short HEAD 2>/dev/null)
+endif
 GIT_COMMIT := $(shell git rev-parse HEAD)
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 

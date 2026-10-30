@@ -1,11 +1,18 @@
 # Default values for cosmolet
-replicaCount: 1
 
 image:
-  repository: platformbuilds/cosmolet
+  # Defaults match `make docker-build` (Makefile DOCKER_REGISTRY/
+  # DOCKER_REPOSITORY). The tag defaults to the chart appVersion so the
+  # chart and the build share a single version source; override with
+  # --set image.tag to pin a specific build.
+  registry: docker.io
+  repository: cosmolet/cosmolet
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: ""
 
+# Configuration rendered into the cosmolet ConfigMap (config.yaml) in the
+# binary's snake_case schema (see pkg/config/config.go). The keys below are
+# camelCase in values.yaml for Helm convention but are rendered as snake_case.
 config:
   services:
     namespaces:
@@ -14,9 +21,25 @@ config:
   loopIntervalSeconds: 30
   bgp:
     enabled: true
+    # BGP autonomous system number (1..4294967295). Required and validated
+    # when bgp.enabled is true (see Finding 8). Override per deployment.
+    asn: 65001
   logging:
     level: "info"
     format: "text"
+  frr:
+    # Path to the FRR unix socket. Mounts the same /var/run/frr as the pod.
+    socketPath: "/var/run/frr"
+  otel:
+    # Enable OTLP/HTTP push of traces and metrics to `endpoint`. Tracing is
+    # always on; with enabled=false (default) spans are dropped and metrics
+    # are still served on /metrics. When enabled, endpoint must be set
+    # (e.g. "localhost:4318" or "http://otel-collector:4318").
+    enabled: false
+    endpoint: ""
+    # Trace sampling ratio (0..1). Values outside (0,1) mean "always sample";
+    # a value in (0,1) samples by trace-ID ratio, parent-based.
+    sampleRatio: 1
 
 resources:
   limits:
@@ -46,3 +69,24 @@ securityContext:
 daemonset:
   hostNetwork: true
   hostPID: true
+
+# Finding 19: in-pod probes. The binary serves /healthz (liveness) and
+# /readyz (readiness) on :8080 (cmd/cosmolet/main.go). With hostNetwork: true
+# these hit the node's host address. Set a probe block to {} to disable it.
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /readyz
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
